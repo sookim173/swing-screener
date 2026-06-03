@@ -1,0 +1,16 @@
+[
+  {
+    "ticker":            "GRRR",
+    "entry_date":        "2026-06-03",
+    "entry_price":       17.37,
+    "shares":            10,
+    "structural_stop":   14.62,
+    "current_stop":      14.62,
+    "initial_target":    24.25,
+    "risk_per_share":    2.75,
+    "pattern":           "Momentum Pullback",
+    "catalyst":          "Momentum + Short Squeeze setup",
+    "sector_etf":        "XBI",
+    "qqq_ret_at_entry":  0.02
+  }
+]

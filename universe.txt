@@ -1,0 +1,107 @@
+# ============================================================
+# Swing Screener Universe — 매일 업데이트 권장
+# 기준: 주가 $5-$50, 시총 $200M-$10B, 평균 거래대금 $10M+
+# 출처: Finviz > Screener > Price $5-50, Mktcap Small/Mid
+#       + 최근 RVOL spike 종목 수동 추가
+# ============================================================
+
+# ── Biotech / Healthcare ─────────────────────────────────
+ACAD
+ACHC
+ADMA
+ALKS
+APLS
+ARWR
+AVTR
+BEAM
+CLDX
+CRSP
+CYTK
+FOLD
+IOVA
+ITCI
+KROS
+LEGN
+MRTX
+NKTR
+NVAX
+PCVX
+RCUS
+RVMD
+SAGE
+SRPT
+TGTX
+YMAB
+
+# ── Technology / Software ────────────────────────────────
+AGYS
+AMBA
+APPN
+BAND
+BIGC
+BTBT
+CNXC
+DDOG
+DLO
+DOCN
+FRSH
+HCAT
+JAMF
+LPSN
+MARA
+MGNI
+MNDY
+OPEN
+PAYO
+PRCT
+PROG
+RAMP
+RIOT
+SMAR
+STEM
+TOST
+VRNS
+WEAV
+ZI
+
+# ── Consumer / Retail ────────────────────────────────────
+BOOT
+CAKE
+CVNA
+ELF
+GPRO
+HAYW
+LAZY
+LOVE
+MODG
+ODP
+PTLO
+RMBL
+SCVL
+SKIN
+STGW
+TUYA
+URBN
+VIEW
+XPOF
+
+# ── Energy / Industrials ─────────────────────────────────
+AMRC
+CDEV
+CLNE
+COHU
+CRK
+DNOW
+DQ
+FLNC
+GPOR
+HUT
+MTDR
+NEXT
+NRGV
+SHLS
+SMR
+STKL
+TPVG
+VET
+VVPR

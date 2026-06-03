@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"C:\\\\Users\\\\tngus\\\\OneDrive\\\\Desktop\\\\files\\\\\" 2>/dev/null || dir \"C:\\\\Users\\\\tngus\\\\OneDrive\\\\Desktop\\\\files\\\\\")",
+      "PowerShell(cd \"C:\\\\Users\\\\tngus\\\\OneDrive\\\\Desktop\\\\swing_screener\"; $env:PYTHONIOENCODING=\"utf-8\"; python screener_demo.py 2>&1)",
+      "PowerShell(pip install alpaca-py 2>&1)",
+      "PowerShell(tail -3)",
+      "Bash(python monitor.py)",
+      "Bash(pip freeze *)",
+      "Bash(findstr -i \"streamlit yfinance finnhub pandas numpy python-dotenv requests websocket\")",
+      "Bash(printf '# API keys\\\\n.env\\\\n.streamlit/secrets.toml\\\\n\\\\n# Output\\\\noutput/\\\\n__pycache__/\\\\n*.pyc\\\\n\\\\n# OS\\\\n.DS_Store\\\\nThumbs.db\\\\n')",
+      "Bash(python -c \"import dashboard; print\\('import OK'\\)\")",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}

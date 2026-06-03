@@ -1,0 +1,12 @@
+# API keys
+.env
+.streamlit/secrets.toml
+
+# Output
+output/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
