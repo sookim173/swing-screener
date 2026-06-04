@@ -8,11 +8,14 @@ Stop 계산 (3가지 중 최적값):
   3. VWAP 기반 = VWAP - 0.5%
   → 셋 중 entry에 가장 가까운 값 (너무 넓은 손절 방지)
 
-Target 계산 (2가지):
-  1. R:R 기반  = entry + (risk × 2.5)
-  2. 저항선 기반 = 최근 20일 고점 또는 52주 고점
+Target 계산 (3가지):
+  1. R:R 기반   = entry + (risk × 2.5)   ← risk = entry - stop (진입 시 확정)
+  2. ATR 기반   = entry + (ATR × 3.75)   ← ATR × 1.5 stop 기준의 2.5R
+  3. 저항선 기반 = 최근 20일 고점 또는 52주 고점
+  → 보수적 목표: 셋 중 가장 낮은 값
 
 원칙:
+  - risk는 entry - stop 으로 진입 시 1회 확정 (current 기준 재계산 금지)
   - Stop은 절대 아래로 내리지 않음
   - 1R → Breakeven
   - 1.5R → EMA8 아래
@@ -61,24 +64,31 @@ def calculate_suggested_stops(
     else:
         suggested_stop = atr_stop
 
-    # ── Target 1: R:R 2.5 기반 ───────────────────────────────
-    risk = current - suggested_stop
-    rr_target = round(current + (risk * 2.5), 2) if risk > 0 else round(current * 1.15, 2)
+    # ── risk: entry 기준으로 확정 (current 재계산 금지) ────────
+    # pos에 저장된 risk_per_share 우선 사용, 없으면 entry - suggested_stop 으로 산정
+    saved_risk = pos.get("risk_per_share", 0)
+    if saved_risk > 0.01:
+        risk = saved_risk
+    else:
+        risk = entry - suggested_stop
 
-    # ── Target 2: 저항선 기반 ────────────────────────────────
+    # ── Target 1: R:R 2.5 기반 (entry 기준) ─────────────────
+    rr_target = round(entry + (risk * 2.5), 2) if risk > 0 else round(entry * 1.15, 2)
+
+    # ── Target 2: ATR 기반 (entry - ATR×1.5 stop 전제의 2.5R) ─
+    atr_target = round(entry + (atr * 1.5 * 2.5), 2)   # = entry + ATR × 3.75
+
+    # ── Target 3: 저항선 기반 ────────────────────────────────
     high = df["high"]
-    # 20일 고점 (진입 이후 저항선)
     resistance_20d = round(float(high.iloc[-22:].max()), 2)
-    # 52주 고점
     resistance_52w = round(float(high.rolling(252).max().iloc[-1])
                            if len(high) >= 252 else high.max(), 2)
 
-    # 현재가보다 높은 저항선 중 가장 가까운 것
     resistances = [r for r in [resistance_20d, resistance_52w] if r > current]
     resistance_target = min(resistances) if resistances else rr_target
 
-    # ── 보수적 목표: 두 target 중 낮은 것 ─────────────────────
-    conservative_target = min(rr_target, resistance_target)
+    # ── 보수적 목표: 셋 중 가장 낮은 값 ─────────────────────
+    conservative_target = min(rr_target, atr_target, resistance_target)
 
     return {
         # Stop 3가지
@@ -87,9 +97,10 @@ def calculate_suggested_stops(
         "vwap_stop":         vwap_stop,
         "suggested_stop":    suggested_stop,
 
-        # Target 2가지
-        "rr_target":         rr_target,
-        "resistance_target": resistance_target,
+        # Target 3가지
+        "rr_target":          rr_target,
+        "atr_target":         atr_target,
+        "resistance_target":  resistance_target,
         "conservative_target": conservative_target,
 
         # 참고 정보

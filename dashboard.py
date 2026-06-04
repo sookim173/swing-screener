@@ -375,7 +375,7 @@ def run_monitor_cached(positions: list):
     from modules.position_manager.intraday_data import get_intraday_df, calculate_intraday_indicators
     from modules.position_manager.health_check  import calculate_health_score
     from modules.position_manager.stop_tracker  import update_trailing_stop, calculate_suggested_stops
-    from modules.position_manager.exit_rules    import decide_action
+    from modules.position_manager.exit_rules    import decide_action, _holding_days
 
     market_data  = get_market_data(MARKET_ETFS)
     market_info  = score_market(market_data)
@@ -412,13 +412,16 @@ def run_monitor_cached(positions: list):
                 "ema21": daily_ind.get("ma20", daily_ind["close"]),
             }
 
-        # Sector strength
+        # Sector strength + RS 계산
         sector_etf = pos.get("sector_etf", "QQQ")
+        sector_ret_20d = 0.0
         try:
             sec_df = get_price_data(sector_etf)
-            sector_strong = (sec_df is not None and len(sec_df) >= 21 and
-                             float(sec_df["close"].iloc[-1]) >
-                             float(sec_df["close"].rolling(20).mean().iloc[-1]))
+            if sec_df is not None and len(sec_df) >= 21:
+                sector_strong  = float(sec_df["close"].iloc[-1]) > float(sec_df["close"].rolling(20).mean().iloc[-1])
+                sector_ret_20d = float(sec_df["close"].iloc[-1] / sec_df["close"].iloc[-21] - 1)
+            else:
+                sector_strong = True
         except Exception:
             sector_strong = True
 
@@ -456,7 +459,22 @@ def run_monitor_cached(positions: list):
 
         current = intraday_ind.get("current_price") or daily_ind["close"]
         entry   = pos["entry_price"]
+        risk    = pos.get("risk_per_share", suggested["risk_per_share"])
         pnl_pct = (current - entry) / entry
+
+        # Trade Age
+        trade_age = _holding_days(pos.get("entry_date"))
+
+        # RS vs Sector ETF (20일 수익률 차이)
+        ticker_ret_20d = daily_ind.get("ret_20d", 0)
+        rs_vs_sector   = round((ticker_ret_20d - sector_ret_20d) * 100, 2)
+
+        # Remaining R:R (현재가 기준 남은 보상/위험)
+        target_price     = suggested["conservative_target"]
+        remaining_reward = target_price - current
+        remaining_risk   = current - pos["current_stop"]
+        remaining_rr     = round(remaining_reward / remaining_risk, 2) if remaining_risk > 0 else 0
+        remaining_upside = round(remaining_reward / current * 100, 2) if current > 0 else 0
 
         results.append({
             "Ticker":        ticker,
@@ -466,9 +484,24 @@ def run_monitor_cached(positions: list):
             "Entry":         entry,
             "PnL%":          round(pnl_pct * 100, 2),
             "R":             decision["unrealized_R"],
-            "Days":          pos.get("entry_date", ""),
+            # ── 보완 1: Trade Age ─────────────────────────────
+            "Trade_Age":     trade_age,
+            "Entry_Date":    pos.get("entry_date", ""),
+            # ── 보완 2: RVOL ──────────────────────────────────
+            "RVOL":          daily_ind.get("rvol", 0),
+            "RVOL_3d":       daily_ind.get("rvol_3d_avg", 0),
+            # ── 보완 3: RS vs Sector ──────────────────────────
+            "RS_vs_Sector":  rs_vs_sector,
+            "Sector_ETF":    sector_etf,
+            "Ticker_Ret20d": round(ticker_ret_20d * 100, 2),
+            "Sector_Ret20d": round(sector_ret_20d * 100, 2),
+            # ── 보완 4: Remaining R:R ─────────────────────────
+            "Remaining_RR":     remaining_rr,
+            "Remaining_Upside": remaining_upside,
+            # ── Health ────────────────────────────────────────
             "Health":        health["health_score"],
             "Health_Grade":  health["health_grade"],
+            "Health_Details": health.get("health_details", {}),
             "Stop":               pos["current_stop"],
             "Stop_Moved":         stop_result["stop_moved"],
             "Stop_Reason":        stop_result["stop_reason"],
@@ -479,10 +512,11 @@ def run_monitor_cached(positions: list):
             "VWAP_Stop":          suggested["vwap_stop"],
             # 자동 계산 Target
             "RR_Target":          suggested["rr_target"],
+            "ATR_Target":         suggested["atr_target"],
             "Resistance_Target":  suggested["resistance_target"],
-            "Conservative_Target": suggested["conservative_target"],
+            "Conservative_Target": target_price,
             "Suggested_RR":       suggested["suggested_rr"],
-            "Target":             suggested["conservative_target"],
+            "Target":             target_price,
             "Shares":        pos.get("shares", 0),
             "VWAP":          intraday_ind.get("vwap"),
             "Above_VWAP":    intraday_ind.get("above_vwap"),
@@ -654,15 +688,41 @@ def render_monitor_tab():
     for _, row in df.iterrows():
         col_color = _action_color(row["Action"])
         pnl_sign  = "+" if row["PnL%"] >= 0 else ""
+        trade_age = row.get("Trade_Age", 0)
+        r_val     = row.get("R", 0)
 
         with st.expander(
             f"{col_color} **{row['Ticker']}**  |  "
             f"{action_badge(row['Action'])}  |  "
-            f"P/L: {pnl_sign}{row['PnL%']:.1f}%  ({row['R']:+.1f}R)",
+            f"Day {trade_age}  |  "
+            f"P/L: {pnl_sign}{row['PnL%']:.1f}%  ({r_val:+.2f}R)",
             expanded=(row["Action"] not in {"HOLD", "CAUTION"})
         ):
+            # ── 보완 1: Current R + Remaining R:R (최상단 강조) ──
+            r_color = "normal" if r_val >= 0 else "inverse"
+            rr_left = row.get("Remaining_RR", 0)
+            hc1, hc2, hc3, hc4, hc5 = st.columns(5)
+            hc1.metric("Current R",
+                       f"{r_val:+.2f}R",
+                       help="(현재가 - 진입가) / risk_per_share")
+            hc2.metric("남은 R:R",
+                       f"{rr_left:.1f} : 1" if rr_left > 0 else "-",
+                       help="(목표 - 현재가) / (현재가 - 현재손절)")
+            hc3.metric("남은 상승여력",
+                       f"+{row.get('Remaining_Upside', 0):.1f}%" if row.get('Remaining_Upside', 0) > 0 else "-")
+            hc4.metric("Trade Age",
+                       f"Day {trade_age}",
+                       delta="⚠ 횡보 점검" if trade_age >= 10 else None,
+                       delta_color="inverse" if trade_age >= 10 else "normal",
+                       help="진입일 기준 보유일수. 10일 이상 횡보 시 청산 고려.")
+            hc5.metric("Health",
+                       f"{row['Health']}/100",
+                       delta=row['Health_Grade'])
+
+            st.markdown("---")
+
             # ── 기본 메트릭 ──────────────────────────────────
-            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            mc1, mc2, mc3, mc4 = st.columns(4)
             mc1.metric("Current",  f"${row['Current']:.2f}",
                        delta=f"{pnl_sign}{row['PnL%']:.1f}%")
             mc2.metric("Entry",    f"${row['Entry']:.2f}")
@@ -671,7 +731,6 @@ def render_monitor_tab():
                        delta_color="normal")
             mc4.metric("Conservative Target", f"${row['Conservative_Target']:.2f}"
                        if row.get('Conservative_Target') else "-")
-            mc5.metric("Health",   f"{row['Health']}/100")
 
             # ── Action 판단 ───────────────────────────────
             st.info(f"**{action_badge(row['Action'])}** — {row['Reason']}")
@@ -680,7 +739,59 @@ def render_monitor_tab():
             if row["Health_Issues"]:
                 st.warning(f"Health issues: {row['Health_Issues']}")
 
-            # ── 자동 계산 Stop 비교 ───────────────────────
+            # ── 보완 2: RVOL + RS vs Sector ──────────────
+            st.markdown("**모멘텀 지표**")
+            mo1, mo2, mo3, mo4 = st.columns(4)
+            rvol     = row.get("RVOL", 0)
+            rvol_3d  = row.get("RVOL_3d", 0)
+            rs       = row.get("RS_vs_Sector", 0)
+            rvol_label = "Strong" if rvol >= 2.0 else ("Weak" if rvol < 1.0 else "Normal")
+            rs_label   = "Strong" if rs > 0 else "Weak"
+            mo1.metric("RVOL (오늘)",
+                       f"{rvol:.1f}x",
+                       delta=rvol_label,
+                       delta_color="normal" if rvol >= 1.0 else "inverse",
+                       help="오늘 거래량 / 20일 평균 거래량")
+            mo2.metric("RVOL (3일 평균)",
+                       f"{rvol_3d:.1f}x",
+                       help="최근 3일 RVOL 평균 — 단발 스파이크 vs 지속 모멘텀 구분")
+            mo3.metric(f"RS vs {row.get('Sector_ETF','QQQ')}",
+                       f"{rs:+.1f}%",
+                       delta=rs_label,
+                       delta_color="normal" if rs > 0 else "inverse",
+                       help=f"20일 수익률 차이. 종목 {row.get('Ticker_Ret20d',0):+.1f}% / {row.get('Sector_ETF','QQQ')} {row.get('Sector_Ret20d',0):+.1f}%")
+            mo4.metric("Sector",
+                       "✅ Strong" if row["Sector_Strong"] else "❌ Weak")
+
+            # ── 보완 3: Health Score 세부 분해 ───────────
+            st.markdown("**Health Score 분해**")
+            hd = row.get("Health_Details") or {}
+            score_map = {
+                "손절 위": ("above_stop",        15),
+                "VWAP 위": ("above_vwap",         12),
+                "EMA":      ("ema_score",          10),
+                "Higher Low": ("higher_low",       10),
+                "매수압력":  ("buying_pressure",   10),
+                "깨끗한 캔들": ("clean_candle",    8),
+                "RS 강도":  ("rs_strong",          10),
+                "카탈리스트": ("catalyst_intact",  10),
+                "섹터강도":  ("sector_strong",      5),
+                "목표여유":  ("room_to_target",     5),
+            }
+            hd_cols = st.columns(len(score_map))
+            for col_i, (label, (key, max_pts)) in enumerate(score_map.items()):
+                val = hd.get(key, False)
+                if key == "ema_score":
+                    pts = val if isinstance(val, (int, float)) else (10 if val else 0)
+                    earned = pts
+                else:
+                    earned = max_pts if val else 0
+                hd_cols[col_i].metric(label,
+                                      f"{earned}/{max_pts}",
+                                      delta="✅" if earned == max_pts else "❌",
+                                      delta_color="normal" if earned == max_pts else "inverse")
+
+            # ── Stop 분석 ─────────────────────────────────
             st.markdown("**Stop 분석**")
             sc1, sc2, sc3 = st.columns(3)
             sc1.metric("구조적 손절",  f"${row.get('Structural_Stop', '-'):.2f}"
@@ -693,29 +804,31 @@ def render_monitor_tab():
                        if row.get('VWAP_Stop') else "-",
                        help="VWAP - 0.5% (당일 수급 기준)")
 
-            # ── 자동 계산 Target 비교 ─────────────────────
+            # ── Target 분석 ───────────────────────────────
             st.markdown("**Target 분석**")
-            tc1, tc2, tc3 = st.columns(3)
+            tc1, tc2, tc3, tc4 = st.columns(4)
             tc1.metric("R:R 2.5 목표",   f"${row.get('RR_Target', '-'):.2f}"
                        if row.get('RR_Target') else "-",
-                       help="현재가 + risk × 2.5")
-            tc2.metric("저항선 목표",    f"${row.get('Resistance_Target', '-'):.2f}"
+                       help="entry + (entry - stop) × 2.5  ← risk는 진입 시 확정")
+            tc2.metric("ATR 기반 목표",  f"${row.get('ATR_Target', '-'):.2f}"
+                       if row.get('ATR_Target') else "-",
+                       help="entry + ATR × 3.75  (ATR×1.5 손절 전제의 2.5R)")
+            tc3.metric("저항선 목표",    f"${row.get('Resistance_Target', '-'):.2f}"
                        if row.get('Resistance_Target') else "-",
                        help="20일 고점 / 52주 고점 중 가까운 저항선")
-            tc3.metric("보수적 목표",    f"${row.get('Conservative_Target', '-'):.2f}"
+            tc4.metric("보수적 목표",    f"${row.get('Conservative_Target', '-'):.2f}"
                        if row.get('Conservative_Target') else "-",
                        delta=f"R:R {row.get('Suggested_RR', 0):.1f}",
                        delta_color="normal",
-                       help="두 목표 중 낮은 값 (현실적 목표)")
+                       help="세 목표 중 가장 낮은 값 (현실적 목표)")
 
             # ── 5분봉 기술적 지표 ─────────────────────────
             st.markdown("**기술적 지표 (5분봉)**")
-            ind_cols = st.columns(5)
+            ind_cols = st.columns(4)
             ind_cols[0].metric("VWAP",       f"${row['VWAP']:.2f}" if row['VWAP'] else "-")
             ind_cols[1].metric("Above VWAP", "✅" if row["Above_VWAP"] else "❌")
             ind_cols[2].metric("Above EMA8", "✅" if row["Above_EMA8"] else "❌")
             ind_cols[3].metric("Higher Low", "✅" if row["HL_5m"] else "❌")
-            ind_cols[4].metric("Sector",     "✅" if row["Sector_Strong"] else "❌")
 
 
 # ════════════════════════════════════════════════════════
