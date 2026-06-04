@@ -945,71 +945,66 @@ def render_monitor_tab():
 
             with right_col:
                 # ── 손절 ────────────────────────────────
-                st.markdown('<p class="sec-label">손절</p>', unsafe_allow_html=True)
                 stop_src = row.get("Suggested_Stop_Source", "-")
-                st.markdown(
-                    f'🟢 **활성** &nbsp; ${row.get("Stop",0):.2f} &nbsp;'
-                    f'<span style="color:#888;font-size:.8rem">({stop_src})</span><br>'
-                    f'🔴 **비상** &nbsp; ${row.get("Structural_Stop",0):.2f} &nbsp;'
-                    f'<span style="color:#888;font-size:.8rem">(구조 붕괴선)</span><br>'
-                    f'<span style="color:#666;font-size:.78rem">'
-                    f'ATR ${row.get("ATR_Stop",0):.2f} &nbsp;|&nbsp; '
-                    f'VWAP ${row.get("VWAP_Stop",0):.2f}</span>',
-                    unsafe_allow_html=True
+                rs1, rs2 = st.columns(2)
+                rs1.metric("🟢 활성 손절", f"${row.get('Stop', 0):.2f}",
+                           delta=stop_src, delta_color="off",
+                           help="현재 실제 적용 중인 손절선")
+                rs2.metric("🔴 비상 손절", f"${row.get('Structural_Stop', 0):.2f}",
+                           delta="구조 붕괴선", delta_color="off",
+                           help="이탈 시 스윙 트렌드 완전 붕괴")
+                st.caption(
+                    f"참고 — ATR: ${row.get('ATR_Stop',0):.2f}  |  "
+                    f"VWAP: ${row.get('VWAP_Stop',0):.2f}"
                 )
+
+                st.divider()
 
                 # ── 목표가 ──────────────────────────────
-                st.markdown('<p class="sec-label" style="margin-top:10px">목표가</p>', unsafe_allow_html=True)
-                st.markdown(
-                    f'🎯 **보수적** &nbsp; ${row.get("Conservative_Target",0):.2f} &nbsp;'
-                    f'<span style="color:#888;font-size:.8rem">(R:R {row.get("Suggested_RR",0):.1f})</span><br>'
-                    f'<span style="color:#666;font-size:.78rem">'
-                    f'R:R 2.5 ${row.get("RR_Target",0):.2f} &nbsp;|&nbsp; '
-                    f'ATR ${row.get("ATR_Target",0):.2f} &nbsp;|&nbsp; '
-                    f'저항 ${row.get("Resistance_Target",0):.2f}</span>',
-                    unsafe_allow_html=True
+                rt1, rt2 = st.columns(2)
+                rt1.metric("🎯 목표가", f"${row.get('Conservative_Target', 0):.2f}",
+                           delta=f"남은 R:R {row.get('Suggested_RR', 0):.1f}",
+                           delta_color="normal")
+                rt2.metric("R:R 2.5", f"${row.get('RR_Target', 0):.2f}",
+                           help="entry + risk × 2.5")
+                st.caption(
+                    f"ATR: ${row.get('ATR_Target',0):.2f}  |  "
+                    f"저항: ${row.get('Resistance_Target',0):.2f}"
                 )
 
+                st.divider()
+
                 # ── 포지션 ──────────────────────────────
-                st.markdown('<p class="sec-label" style="margin-top:10px">포지션</p>', unsafe_allow_html=True)
                 shares   = row.get("Shares", 0)
                 pos_val  = row.get("Position_Value", 0)
                 risk_usd = row.get("Risk_Dollars", 0)
                 risk_pct = row.get("Risk_Pct_Account", 0)
-                risk_color = "#ef9a9a" if risk_pct > 3 else "#81c784"
-                st.markdown(
-                    f'{shares}주 &nbsp; ${pos_val:,.0f} &nbsp;'
-                    f'| Risk <span style="color:{risk_color};font-weight:600">'
-                    f'${risk_usd:.2f} ({risk_pct:.1f}%)</span>',
-                    unsafe_allow_html=True
-                )
+                rp1, rp2 = st.columns(2)
+                rp1.metric("포지션", f"{shares}주  /  ${pos_val:,.0f}")
+                rp2.metric("리스크", f"${risk_usd:.2f}  ({risk_pct:.1f}%)",
+                           delta="⚠ 과다" if risk_pct > 3 else "적정",
+                           delta_color="inverse" if risk_pct > 3 else "normal")
 
-            # ════ ROW 4: 기술지표 바 (한 줄) ══════════════
-            st.markdown('<p class="sec-label" style="margin-top:8px">기술지표 (5분봉)</p>', unsafe_allow_html=True)
+            # ════ ROW 4: 기술지표 바 ══════════════════════
+            st.markdown("---")
             vwap_val  = row.get("VWAP", 0)
             vwap_dist = row.get("VWAP_Dist_Pct", 0)
             atr_val   = row.get("ATR_Val", 0)
             prev_low  = row.get("HL_Prev_Low")
             curr_low  = row.get("HL_Curr_Low")
             hl_ok     = row.get("HL_5m", False)
-            hl_str    = (f"${prev_low:.2f}→${curr_low:.2f}" if prev_low and curr_low else "")
-            hl_color  = "#81c784" if hl_ok else "#ef9a9a"
-            vd_color  = "#fff176" if abs(vwap_dist) > 5 else "#81c784" if vwap_dist > 0 else "#ef9a9a"
-            def ind_chip(label, ok):
-                c = "#81c784" if ok else "#ef9a9a"
-                return f'<span style="color:{c};font-size:.85rem;margin-right:12px">{"✅" if ok else "❌"} {label}</span>'
-            st.markdown(
-                f'<span style="color:#888;font-size:.85rem;margin-right:8px">VWAP</span>'
-                f'<span style="color:{vd_color};font-size:.85rem;margin-right:4px">${vwap_val:.2f} ({vwap_dist:+.1f}%)</span>'
-                f'&nbsp;&nbsp;'
-                + ind_chip("EMA21", row.get("Above_EMA21", False))
-                + ind_chip("EMA8",  row.get("Above_EMA8", False))
-                + ind_chip("VWAP",  row.get("Above_VWAP", False))
-                + f'<span style="color:{hl_color};font-size:.85rem;margin-right:12px">'
-                  f'{"✅" if hl_ok else "❌"} Higher Low {hl_str}</span>'
-                + f'<span style="color:#888;font-size:.85rem">ATR ${atr_val:.2f}</span>',
-                unsafe_allow_html=True
-            )
+            hl_label  = ("✅ 유지" if hl_ok else "❌ 붕괴") + (
+                         f"  {prev_low:.2f}→{curr_low:.2f}" if prev_low and curr_low else "")
+            tc1, tc2, tc3, tc4, tc5, tc6 = st.columns(6)
+            tc1.metric("VWAP", f"${vwap_val:.2f}",
+                       delta=f"{vwap_dist:+.1f}%",
+                       delta_color="off" if abs(vwap_dist) > 5 else "normal")
+            tc2.metric("Above VWAP", "✅" if row.get("Above_VWAP") else "❌")
+            tc3.metric("Above EMA21", "✅" if row.get("Above_EMA21") else "❌",
+                       help=f"EMA21 ${row.get('EMA21_Val',0):.2f}" if row.get('EMA21_Val') else None)
+            tc4.metric("Above EMA8",  "✅" if row.get("Above_EMA8") else "❌")
+            tc5.metric("Higher Low",  hl_label)
+            tc6.metric("ATR(14)", f"${atr_val:.2f}" if atr_val else "-")
 
 
 # ════════════════════════════════════════════════════════
