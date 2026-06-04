@@ -28,9 +28,10 @@ def calculate_indicators(df: pd.DataFrame) -> dict:
     today_vol  = volume.iloc[-1]
     rvol       = today_vol / avg_vol_20 if avg_vol_20 > 0 else 0
 
-    # RVOL 3-day average: smoothed momentum signal vs single-day spike
+    # RVOL 3/5-day average: smoothed momentum signal vs single-day spike
     rvol_series  = volume / volume.rolling(20).mean()
     rvol_3d_avg  = rvol_series.iloc[-3:].mean() if len(rvol_series) >= 3 else rvol
+    rvol_5d_avg  = rvol_series.iloc[-5:].mean() if len(rvol_series) >= 5 else rvol
 
     avg_dollar_vol = (close * volume).rolling(20).mean().iloc[-1]
 
@@ -94,6 +95,7 @@ def calculate_indicators(df: pd.DataFrame) -> dict:
         # Volume
         "rvol":         round(rvol, 2),
         "rvol_3d_avg":  round(float(rvol_3d_avg), 2) if not pd.isna(rvol_3d_avg) else round(rvol, 2),
+        "rvol_5d_avg":  round(float(rvol_5d_avg), 2) if not pd.isna(rvol_5d_avg) else round(rvol, 2),
         "avg_vol_20":   int(avg_vol_20),
         "today_vol":    int(today_vol),
         "avg_dollar_vol": round(avg_dollar_vol, 0),

@@ -3,6 +3,22 @@ modules/position_manager/health_check.py
 포지션 건강도 점수 계산 (100점 만점)
 
 일봉 + 5분봉 데이터 기반.
+
+항목별 배점 (합계 ~100):
+  손절 위치   15  (필수 조건)
+  VWAP 위    12
+  RS 강도    12
+  Higher Low 12
+  EMA21 위    8  (스윙 추세)
+  카탈리스트  10
+  RVOL       8  (거래량 모멘텀)
+  매수 압력   8
+  EMA8 위     4  (단기 모멘텀)
+  섹터 강도   5
+  목표 여유   5
+  캔들 품질   4
+  ─────────── 103 → min(score, 100)
+
 점수에 따른 판정:
   80+  → HOLD_TIGHT
   65+  → HOLD
@@ -52,54 +68,76 @@ def calculate_health_score(
         details["above_vwap"] = False
         reasons.append("VWAP 아래")
 
-    # ── 3. EMA8 / EMA21 위 (5분봉) ───────────────────────────
-    ema_score = 0
-    if intraday_ind.get("above_ema8"):
-        ema_score += 5
+    # ── 3. EMA21 위 (5분봉) — 스윙 추세 핵심 ────────────────
     if intraday_ind.get("above_ema21"):
-        ema_score += 5
-    score += ema_score
-    details["ema_score"] = ema_score
-    if ema_score == 0:
-        reasons.append("EMA8/21 아래")
+        score += 8
+        details["above_ema21"] = True
+    else:
+        details["above_ema21"] = False
+        reasons.append("EMA21 아래 (스윙 추세 약화)")
 
-    # ── 4. Higher Low 유지 (5분봉) ───────────────────────────
+    # ── 4. EMA8 위 (5분봉) — 단기 모멘텀 ────────────────────
+    if intraday_ind.get("above_ema8"):
+        score += 4
+        details["above_ema8"] = True
+    else:
+        details["above_ema8"] = False
+        # EMA21 위면 단순 단기 조정으로 해석 → reason 생략
+
+    details["ema_score"] = (8 if details["above_ema21"] else 0) + (4 if details["above_ema8"] else 0)
+
+    # ── 5. Higher Low 유지 (5분봉) ───────────────────────────
     if intraday_ind.get("higher_low_5m"):
-        score += 10
+        score += 12
         details["higher_low"] = True
     else:
         details["higher_low"] = False
         reasons.append("Higher Low 깨짐")
 
-    # ── 5. 상승일 거래량 증가 / 하락일 거래량 감소 ──────────────
+    # ── 6. RVOL (일봉) — 거래량 모멘텀 ──────────────────────
+    rvol = daily_ind.get("rvol", 0)
+    if rvol >= 2.0:
+        score += 8
+        details["rvol_ok"] = True
+    elif rvol >= 1.0:
+        score += 5
+        details["rvol_ok"] = True
+    else:
+        score += 0
+        details["rvol_ok"] = False
+        reasons.append(f"거래량 부족 (RVOL {rvol:.1f}x)")
+
+    # ── 7. 상승일 거래량 증가 / 하락일 거래량 감소 ──────────────
     if intraday_ind.get("buying_pressure"):
-        score += 10
+        score += 8
         details["buying_pressure"] = True
     else:
         details["buying_pressure"] = False
         reasons.append("매수 압력 약함")
 
-    # ── 6. 윗꼬리 없음 (매도 압력 없음) ─────────────────────────
+    # ── 8. 윗꼬리 없음 (매도 압력 없음) ─────────────────────────
     wick = intraday_ind.get("upper_wick_ratio", 0)
     if wick < 0.3:
-        score += 8
+        score += 4
         details["clean_candle"] = True
     elif wick > 0.6:
         reasons.append(f"윗꼬리 과다 ({wick:.0%})")
         details["clean_candle"] = False
+    else:
+        details["clean_candle"] = True
 
-    # ── 7. 상대강도 vs QQQ (일봉) ────────────────────────────
+    # ── 9. 상대강도 vs QQQ (일봉) ────────────────────────────
     ret_20d    = daily_ind.get("ret_20d", 0)
     qqq_ret    = pos.get("qqq_ret_at_entry", 0)
     rs_current = ret_20d - qqq_ret
     if rs_current > 0:
-        score += 10
+        score += 12
         details["rs_strong"] = True
     else:
         details["rs_strong"] = False
         reasons.append("QQQ 대비 상대강도 약화")
 
-    # ── 8. 카탈리스트 훼손 없음 ──────────────────────────────
+    # ── 10. 카탈리스트 훼손 없음 ─────────────────────────────
     if catalyst_intact:
         score += 10
         details["catalyst_intact"] = True
@@ -107,7 +145,7 @@ def calculate_health_score(
         details["catalyst_intact"] = False
         reasons.append("카탈리스트 훼손")
 
-    # ── 9. 섹터 강도 유지 ────────────────────────────────────
+    # ── 11. 섹터 강도 유지 ───────────────────────────────────
     if sector_strong:
         score += 5
         details["sector_strong"] = True
@@ -115,7 +153,7 @@ def calculate_health_score(
         details["sector_strong"] = False
         reasons.append("섹터 약화")
 
-    # ── 10. 목표까지 공간 ────────────────────────────────────
+    # ── 12. 목표까지 공간 ────────────────────────────────────
     target      = pos.get("initial_target", entry * 1.15)
     pct_to_tgt  = (target - current) / current if current > 0 else 0
     if pct_to_tgt >= 0.05:

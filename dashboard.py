@@ -577,6 +577,16 @@ def run_monitor_cached(positions: list):
             # ── 보완 2: RVOL ──────────────────────────────────
             "RVOL":          daily_ind.get("rvol", 0),
             "RVOL_3d":       daily_ind.get("rvol_3d_avg", 0),
+            "RVOL_5d":       daily_ind.get("rvol_5d_avg", 0),
+            # ── ATR 값 + VWAP Distance ────────────────────────
+            "ATR_Val":       suggested.get("atr", 0),
+            "VWAP_Dist_Pct": round((intraday_ind.get("vwap", current) and
+                             (current - intraday_ind.get("vwap", current)) /
+                             intraday_ind.get("vwap", current) * 100), 2)
+                             if intraday_ind.get("vwap") else 0,
+            # ── EMA21 ─────────────────────────────────────────
+            "Above_EMA21":   intraday_ind.get("above_ema21"),
+            "EMA21_Val":     intraday_ind.get("ema21"),
             # ── 보완 3: RS vs Sector ──────────────────────────
             "RS_vs_Sector":  rs_vs_sector,
             "Sector_ETF":    sector_etf,
@@ -854,13 +864,14 @@ def render_monitor_tab():
             st.markdown("**Exit Signal 체크리스트**")
             # 모든 가능한 약화 신호 정의
             all_signal_defs = [
-                ("VWAP 아래 종가",         "above_vwap",        True,  "VWAP 이탈"),
-                ("Higher Low 깨짐",        "higher_low",        True,  "고점저점 구조 붕괴"),
-                ("EMA8/21 아래",           "ema_score",         False, "단기 추세 이탈"),
-                ("매수 압력 약함",          "buying_pressure",   True,  "매도 우위"),
-                ("RS 약화",               "rs_strong",         True,  "시장 대비 약세"),
-                ("섹터 약화",              "sector_strong",     True,  "섹터 ETF 하락"),
-                ("손절 위반",              "above_stop",        True,  "구조적 손절 이탈"),
+                ("손절 위반",    "above_stop",    True,  "구조적 손절 이탈"),
+                ("VWAP 이탈",   "above_vwap",    True,  "VWAP 아래 종가"),
+                ("EMA21 이탈",  "above_ema21",   True,  "스윙 추세 붕괴"),
+                ("Higher Low↓", "higher_low",    True,  "고점저점 구조 붕괴"),
+                ("RS 약화",     "rs_strong",     True,  "시장 대비 약세"),
+                ("RVOL 부족",   "rvol_ok",       True,  "거래량 모멘텀 없음"),
+                ("매수압력↓",   "buying_pressure",True, "매도 우위"),
+                ("섹터 약화",   "sector_strong", True,  "섹터 ETF 하락"),
             ]
             hd       = row.get("Health_Details") or {}
             weak_set = set(row.get("Weak_Signals") or [])
@@ -881,53 +892,60 @@ def render_monitor_tab():
                     help=tooltip
                 )
 
-            # ── 보완 2: RVOL + RS vs Sector ──────────────
+            # ── RVOL + RS vs Sector ───────────────────────
             st.markdown("**모멘텀 지표**")
-            mo1, mo2, mo3, mo4 = st.columns(4)
+            mo1, mo2, mo3, mo4, mo5 = st.columns(5)
             rvol     = row.get("RVOL", 0)
             rvol_3d  = row.get("RVOL_3d", 0)
+            rvol_5d  = row.get("RVOL_5d", 0)
             rs       = row.get("RS_vs_Sector", 0)
             rvol_label = "Strong" if rvol >= 2.0 else ("Weak" if rvol < 1.0 else "Normal")
+            # RVOL 추세: 오늘 > 3일 > 5일 이면 증가 추세
+            rvol_trend = "↑ 증가" if rvol >= rvol_3d >= rvol_5d else ("↓ 감소" if rvol <= rvol_3d else "→ 보통")
             rs_label   = "Strong" if rs > 0 else "Weak"
             mo1.metric("RVOL (오늘)",
                        f"{rvol:.1f}x",
                        delta=rvol_label,
                        delta_color="normal" if rvol >= 1.0 else "inverse",
                        help="오늘 거래량 / 20일 평균 거래량")
-            mo2.metric("RVOL (3일 평균)",
+            mo2.metric("RVOL 3일 평균",
                        f"{rvol_3d:.1f}x",
-                       help="최근 3일 RVOL 평균 — 단발 스파이크 vs 지속 모멘텀 구분")
-            mo3.metric(f"RS vs {row.get('Sector_ETF','QQQ')}",
+                       help="최근 3일 RVOL 평균")
+            mo3.metric("RVOL 5일 추세",
+                       f"{rvol_5d:.1f}x",
+                       delta=rvol_trend,
+                       delta_color="normal" if "증가" in rvol_trend else "inverse",
+                       help="오늘>3일>5일이면 거래량 증가 추세")
+            mo4.metric(f"RS vs {row.get('Sector_ETF','QQQ')}",
                        f"{rs:+.1f}%",
                        delta=rs_label,
                        delta_color="normal" if rs > 0 else "inverse",
                        help=f"20일 수익률 차이. 종목 {row.get('Ticker_Ret20d',0):+.1f}% / {row.get('Sector_ETF','QQQ')} {row.get('Sector_Ret20d',0):+.1f}%")
-            mo4.metric("Sector",
+            mo5.metric("Sector",
                        "✅ Strong" if row["Sector_Strong"] else "❌ Weak")
 
             # ── 보완 3: Health Score 세부 분해 ───────────
             st.markdown("**Health Score 분해**")
             hd = row.get("Health_Details") or {}
-            score_map = {
-                "손절 위": ("above_stop",        15),
-                "VWAP 위": ("above_vwap",         12),
-                "EMA":      ("ema_score",          10),
-                "Higher Low": ("higher_low",       10),
-                "매수압력":  ("buying_pressure",   10),
-                "깨끗한 캔들": ("clean_candle",    8),
-                "RS 강도":  ("rs_strong",          10),
-                "카탈리스트": ("catalyst_intact",  10),
-                "섹터강도":  ("sector_strong",      5),
-                "목표여유":  ("room_to_target",     5),
-            }
+            # (label, hd_key, max_pts, is_numeric)
+            score_map = [
+                ("손절 위",    "above_stop",      15, False),
+                ("VWAP 위",   "above_vwap",       12, False),
+                ("RS 강도",   "rs_strong",         12, False),
+                ("Higher Low","higher_low",        12, False),
+                ("EMA21",     "above_ema21",        8, False),
+                ("카탈리스트", "catalyst_intact",  10, False),
+                ("RVOL",      "rvol_ok",            8, False),
+                ("매수압력",  "buying_pressure",    8, False),
+                ("EMA8",      "above_ema8",          4, False),
+                ("섹터강도",  "sector_strong",       5, False),
+                ("목표여유",  "room_to_target",      5, False),
+                ("캔들품질",  "clean_candle",        4, False),
+            ]
             hd_cols = st.columns(len(score_map))
-            for col_i, (label, (key, max_pts)) in enumerate(score_map.items()):
-                val = hd.get(key, False)
-                if key == "ema_score":
-                    pts = val if isinstance(val, (int, float)) else (10 if val else 0)
-                    earned = pts
-                else:
-                    earned = max_pts if val else 0
+            for col_i, (label, key, max_pts, _) in enumerate(score_map):
+                val    = hd.get(key, False)
+                earned = max_pts if val else 0
                 hd_cols[col_i].metric(label,
                                       f"{earned}/{max_pts}",
                                       delta="✅" if earned == max_pts else "❌",
@@ -966,11 +984,26 @@ def render_monitor_tab():
 
             # ── 5분봉 기술적 지표 ─────────────────────────
             st.markdown("**기술적 지표 (5분봉)**")
-            ind_cols = st.columns(4)
-            ind_cols[0].metric("VWAP",       f"${row['VWAP']:.2f}" if row['VWAP'] else "-")
+            ind_cols = st.columns(6)
+            vwap_val      = row.get("VWAP", 0)
+            vwap_dist     = row.get("VWAP_Dist_Pct", 0)
+            atr_val       = row.get("ATR_Val", 0)
+            vwap_dist_str = f"{vwap_dist:+.1f}%" if vwap_dist else "-"
+            vwap_warn     = abs(vwap_dist) > 5  # VWAP에서 5% 이상 이탈 시 과열/과매도 경고
+            ind_cols[0].metric("VWAP",
+                               f"${vwap_val:.2f}" if vwap_val else "-",
+                               delta=vwap_dist_str,
+                               delta_color="off" if vwap_warn else "normal",
+                               help="현재가와 VWAP 거리. ±5% 이상이면 과열/과매도 주의")
             ind_cols[1].metric("Above VWAP", "✅" if row["Above_VWAP"] else "❌")
-            ind_cols[2].metric("Above EMA8", "✅" if row["Above_EMA8"] else "❌")
-            ind_cols[3].metric("Higher Low", "✅" if row["HL_5m"] else "❌")
+            ind_cols[2].metric("Above EMA21",
+                               "✅" if row.get("Above_EMA21") else "❌",
+                               help=f"EMA21: ${row.get('EMA21_Val', 0):.2f}" if row.get('EMA21_Val') else None)
+            ind_cols[3].metric("Above EMA8",  "✅" if row["Above_EMA8"] else "❌")
+            ind_cols[4].metric("Higher Low",  "✅" if row["HL_5m"] else "❌")
+            ind_cols[5].metric("ATR(14)",
+                               f"${atr_val:.2f}" if atr_val else "-",
+                               help="14일 Average True Range. 일일 예상 변동폭")
 
 
 # ════════════════════════════════════════════════════════
