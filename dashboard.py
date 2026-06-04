@@ -847,145 +847,141 @@ def render_monitor_tab():
                         delta=f"Day {trade_age}" + (" ⚠ 횡보" if trade_age >= 10 else ""),
                         delta_color="inverse" if trade_age >= 10 else "off")
 
-            # ════ ROW 2: 판정 3분할 + AI Summary ═════════
+            # ════ ROW 2: 판정 3분할 ═══════════════════════
             tech_grade = row.get("Technical_Grade", "HOLD")
             news_exit  = row.get("News_Exit", False)
             tech_color = {"HOLD_TIGHT": "success", "HOLD": "success",
                           "CAUTION": "warning", "WEAK_EXIT": "error"}.get(tech_grade, "info")
+            summary    = generate_ai_summary(dict(row))
 
             ts1, ts2, ts3 = st.columns([1, 1, 2])
             with ts1:
-                st.markdown('<p class="sec-label">차트 상태</p>', unsafe_allow_html=True)
-                fn = {"success": st.success, "warning": st.warning, "error": st.error}.get(tech_color, st.info)
+                st.caption("차트 상태")
+                fn = {"success": st.success, "warning": st.warning,
+                      "error": st.error}.get(tech_color, st.info)
                 fn(action_badge(tech_grade))
             with ts2:
-                st.markdown('<p class="sec-label">뉴스 상태</p>', unsafe_allow_html=True)
+                st.caption("뉴스 상태")
                 if news_exit:
-                    st.error(f"🚨 위험 — {row.get('News_Reason','')[:50]}")
+                    st.error(f"🚨 {row.get('News_Reason','')[:45]}")
                 else:
                     st.success("✅ 이상 없음")
             with ts3:
-                st.markdown('<p class="sec-label">AI 요약</p>', unsafe_allow_html=True)
-                summary = generate_ai_summary(dict(row))
+                st.caption("AI 요약")
                 if news_exit and tech_grade in ("HOLD_TIGHT", "HOLD"):
                     st.warning(f"⚠️ **REDUCE** — {summary}")
                 elif tech_grade in ("HOLD_TIGHT", "HOLD") and not news_exit:
                     st.success(summary)
                 else:
                     st.warning(summary)
+            if row["Stop_Moved"]:
+                st.success(f"📈 Stop raised — {row['Stop_Reason']}")
 
-            # ════ ROW 3: 좌(신호+모멘텀) / 우(손절+목표+포지션) ═
-            left_col, right_col = st.columns([3, 2])
+            st.markdown("---")
 
-            with left_col:
-                # ── 신호 칩 그리드 ──────────────────────
-                st.markdown('<p class="sec-label">신호 체크</p>', unsafe_allow_html=True)
+            # ════ ROW 3: 균등 4열 ════════════════════════
+            rvol    = row.get("RVOL", 0)
+            rvol_3d = row.get("RVOL_3d", 0)
+            rvol_5d = row.get("RVOL_5d", 0)
+            rs      = row.get("RS_vs_Sector", 0)
+            etf     = row.get("Sector_ETF", "QQQ")
+            shares  = row.get("Shares", 0)
+            pos_val = row.get("Position_Value", 0)
+            risk_usd = row.get("Risk_Dollars", 0)
+            risk_pct = row.get("Risk_Pct_Account", 0)
+            stop_src = row.get("Suggested_Stop_Source", "-")
+            rvol_trend = "↑" if rvol >= rvol_3d >= rvol_5d else ("↓" if rvol <= rvol_5d else "→")
+
+            col_a, col_b, col_c, col_d = st.columns(4)
+
+            # ── A열: 신호 체크 + Health ──────────────────
+            with col_a:
+                st.caption("신호 체크")
                 signal_defs = [
-                    ("손절 위",   "above_stop",      True),
-                    ("VWAP",      "above_vwap",       True),
-                    ("EMA21",     "above_ema21",      True),
-                    ("Higher Low","higher_low",        True),
-                    ("RS",        "rs_strong",         True),
-                    ("RVOL",      "rvol_ok",           True),
-                    ("매수압력",  "buying_pressure",   True),
-                    ("섹터",      "sector_strong",     True),
-                    ("카탈",      "catalyst_intact",   True),
+                    ("손절 위",    "above_stop",       True),
+                    ("VWAP",       "above_vwap",        True),
+                    ("EMA21",      "above_ema21",       True),
+                    ("Higher Low", "higher_low",         True),
+                    ("RS",         "rs_strong",          True),
+                    ("RVOL",       "rvol_ok",            True),
+                    ("매수압력",   "buying_pressure",    True),
+                    ("섹터",       "sector_strong",      True),
+                    ("카탈",       "catalyst_intact",    True),
                 ]
-                chips_html = ""
+                chips = ""
                 for label, key, good in signal_defs:
-                    ok = hd.get(key, good) == good
+                    ok  = hd.get(key, good) == good
                     cls = "sig-ok" if ok else "sig-warn"
-                    icon = "✓" if ok else "✗"
-                    chips_html += f'<span class="sig-chip {cls}">{icon} {label}</span>'
-                st.markdown(chips_html, unsafe_allow_html=True)
+                    chips += f'<span class="sig-chip {cls}">{"✓" if ok else "✗"} {label}</span>'
+                st.markdown(chips, unsafe_allow_html=True)
 
-                # ── 모멘텀 수치 (한 줄) ─────────────────
-                st.markdown('<p class="sec-label" style="margin-top:12px">모멘텀</p>', unsafe_allow_html=True)
-                rvol    = row.get("RVOL", 0)
-                rvol_3d = row.get("RVOL_3d", 0)
-                rvol_5d = row.get("RVOL_5d", 0)
-                rs      = row.get("RS_vs_Sector", 0)
-                rvol_trend = "↑" if rvol >= rvol_3d >= rvol_5d else ("↓" if rvol <= rvol_5d else "→")
-                rvol_color = "#81c784" if rvol >= 1.5 else ("#ef9a9a" if rvol < 1.0 else "#fff176")
-                rs_color   = "#81c784" if rs > 0 else "#ef9a9a"
-                etf = row.get("Sector_ETF", "QQQ")
-                st.markdown(
-                    f'<span style="color:{rvol_color};font-size:.9rem">RVOL {rvol:.1f}x {rvol_trend} '
-                    f'<span style="color:#888">(3d:{rvol_3d:.1f} 5d:{rvol_5d:.1f})</span></span>'
-                    f'&nbsp;&nbsp;&nbsp;'
-                    f'<span style="color:{rs_color};font-size:.9rem">RS vs {etf} {rs:+.1f}% '
-                    f'<span style="color:#888">({row.get("Ticker_Ret20d",0):+.1f}% vs {row.get("Sector_Ret20d",0):+.1f}%)</span></span>',
-                    unsafe_allow_html=True
-                )
-
-                # ── Health Score 바 ──────────────────────
-                st.markdown('<p class="sec-label" style="margin-top:12px">Health Score</p>', unsafe_allow_html=True)
-                h_score = row["Health"]
-                h_color = "#4caf50" if h_score >= 80 else ("#ff9800" if h_score >= 65 else "#f44336")
+                st.markdown("")
+                h = row["Health"]
+                h_color = "#4caf50" if h >= 80 else ("#ff9800" if h >= 65 else "#f44336")
                 score_items = [
-                    ("손절위", hd.get("above_stop", False), 15),
-                    ("VWAP",   hd.get("above_vwap", False), 12),
-                    ("RS",     hd.get("rs_strong", False), 12),
-                    ("HL",     hd.get("higher_low", False), 12),
-                    ("EMA21",  hd.get("above_ema21", False), 8),
-                    ("카탈",   hd.get("catalyst_intact", False), 10),
-                    ("RVOL",   hd.get("rvol_ok", False), 8),
-                    ("압력",   hd.get("buying_pressure", False), 8),
+                    ("손절",  hd.get("above_stop",False),15), ("VWAP", hd.get("above_vwap",False),12),
+                    ("RS",    hd.get("rs_strong",False),12),  ("HL",   hd.get("higher_low",False),12),
+                    ("EMA21", hd.get("above_ema21",False),8), ("카탈", hd.get("catalyst_intact",False),10),
+                    ("RVOL",  hd.get("rvol_ok",False),8),     ("압력", hd.get("buying_pressure",False),8),
                 ]
-                earned_total = sum(pts for _, ok, pts in score_items if ok)
-                breakdown = " · ".join(
-                    f'<span style="color:{"#81c784" if ok else "#ef9a9a"}">{lbl} {pts if ok else 0}/{pts}</span>'
+                bd = "  ".join(
+                    f'{"✅" if ok else "❌"}{lbl} {pts if ok else 0}/{pts}'
                     for lbl, ok, pts in score_items
                 )
                 st.markdown(
-                    f'<span style="color:{h_color};font-size:1.1rem;font-weight:700">{h_score}/100 {row["Health_Grade"]}</span>'
-                    f'<br><span style="font-size:.75rem">{breakdown}</span>',
+                    f'<span style="color:{h_color};font-weight:700;font-size:1rem">'
+                    f'Health {h}/100 · {row["Health_Grade"]}</span>'
+                    f'<br><span style="color:#888;font-size:.72rem">{bd}</span>',
                     unsafe_allow_html=True
                 )
 
-            with right_col:
-                # ── 손절 ────────────────────────────────
-                stop_src = row.get("Suggested_Stop_Source", "-")
-                rs1, rs2 = st.columns(2)
-                rs1.metric("🟢 활성 손절", f"${row.get('Stop', 0):.2f}",
-                           delta=stop_src, delta_color="off",
-                           help="현재 실제 적용 중인 손절선")
-                rs2.metric("🔴 비상 손절", f"${row.get('Structural_Stop', 0):.2f}",
-                           delta="구조 붕괴선", delta_color="off",
-                           help="이탈 시 스윙 트렌드 완전 붕괴")
+            # ── B열: 손절 ────────────────────────────────
+            with col_b:
+                st.caption("손절")
+                st.metric("🟢 활성 손절", f"${row.get('Stop',0):.2f}",
+                          delta=stop_src, delta_color="off",
+                          help="현재 실제 적용 중인 손절선")
+                st.metric("🔴 비상 손절", f"${row.get('Structural_Stop',0):.2f}",
+                          delta="구조 붕괴선", delta_color="off",
+                          help="이탈 시 스윙 트렌드 붕괴")
                 st.caption(
-                    f"참고 — ATR: ${row.get('ATR_Stop',0):.2f}  |  "
-                    f"VWAP: ${row.get('VWAP_Stop',0):.2f}"
+                    f"ATR ${row.get('ATR_Stop',0):.2f}  |  "
+                    f"VWAP ${row.get('VWAP_Stop',0):.2f}"
                 )
 
-                st.divider()
-
-                # ── 목표가 ──────────────────────────────
-                rt1, rt2 = st.columns(2)
-                rt1.metric("🎯 목표가", f"${row.get('Conservative_Target', 0):.2f}",
-                           delta=f"남은 R:R {row.get('Suggested_RR', 0):.1f}",
-                           delta_color="normal")
-                rt2.metric("R:R 2.5", f"${row.get('RR_Target', 0):.2f}",
-                           help="entry + risk × 2.5")
+            # ── C열: 목표가 ──────────────────────────────
+            with col_c:
+                st.caption("목표가")
+                st.metric("🎯 보수적 목표", f"${row.get('Conservative_Target',0):.2f}",
+                          delta=f"남은 R:R {row.get('Suggested_RR',0):.1f}",
+                          delta_color="normal")
+                st.metric("R:R 2.5 목표", f"${row.get('RR_Target',0):.2f}",
+                          help="entry + risk × 2.5 (진입 시 확정)")
                 st.caption(
-                    f"ATR: ${row.get('ATR_Target',0):.2f}  |  "
-                    f"저항: ${row.get('Resistance_Target',0):.2f}"
+                    f"ATR ${row.get('ATR_Target',0):.2f}  |  "
+                    f"저항 ${row.get('Resistance_Target',0):.2f}"
                 )
 
-                st.divider()
+            # ── D열: 포지션 + 모멘텀 ─────────────────────
+            with col_d:
+                st.caption("포지션 / 리스크")
+                st.metric("포지션", f"{shares}주  ·  ${pos_val:,.0f}")
+                st.metric("리스크", f"${risk_usd:.2f}  ({risk_pct:.1f}%)",
+                          delta="⚠ 과다" if risk_pct > 3 else "적정",
+                          delta_color="inverse" if risk_pct > 3 else "normal")
 
-                # ── 포지션 ──────────────────────────────
-                shares   = row.get("Shares", 0)
-                pos_val  = row.get("Position_Value", 0)
-                risk_usd = row.get("Risk_Dollars", 0)
-                risk_pct = row.get("Risk_Pct_Account", 0)
-                rp1, rp2 = st.columns(2)
-                rp1.metric("포지션", f"{shares}주  /  ${pos_val:,.0f}")
-                rp2.metric("리스크", f"${risk_usd:.2f}  ({risk_pct:.1f}%)",
-                           delta="⚠ 과다" if risk_pct > 3 else "적정",
-                           delta_color="inverse" if risk_pct > 3 else "normal")
+                st.markdown("")
+                st.caption("모멘텀")
+                rvol_c = "🟢" if rvol >= 1.5 else ("🔴" if rvol < 1.0 else "🟡")
+                rs_c   = "🟢" if rs > 0 else "🔴"
+                st.markdown(
+                    f"{rvol_c} RVOL **{rvol:.1f}x** {rvol_trend}  "
+                    f"*(3d {rvol_3d:.1f} / 5d {rvol_5d:.1f})*  \n"
+                    f"{rs_c} RS vs {etf} **{rs:+.1f}%**  "
+                    f"*({row.get('Ticker_Ret20d',0):+.1f}% vs {row.get('Sector_Ret20d',0):+.1f}%)*"
+                )
 
-            # ════ ROW 4: 기술지표 바 ══════════════════════
+            # ════ ROW 4: 기술지표 6열 ════════════════════
             st.markdown("---")
             vwap_val  = row.get("VWAP", 0)
             vwap_dist = row.get("VWAP_Dist_Pct", 0)
@@ -999,10 +995,10 @@ def render_monitor_tab():
             tc1.metric("VWAP", f"${vwap_val:.2f}",
                        delta=f"{vwap_dist:+.1f}%",
                        delta_color="off" if abs(vwap_dist) > 5 else "normal")
-            tc2.metric("Above VWAP", "✅" if row.get("Above_VWAP") else "❌")
+            tc2.metric("Above VWAP",  "✅" if row.get("Above_VWAP")  else "❌")
             tc3.metric("Above EMA21", "✅" if row.get("Above_EMA21") else "❌",
                        help=f"EMA21 ${row.get('EMA21_Val',0):.2f}" if row.get('EMA21_Val') else None)
-            tc4.metric("Above EMA8",  "✅" if row.get("Above_EMA8") else "❌")
+            tc4.metric("Above EMA8",  "✅" if row.get("Above_EMA8")  else "❌")
             tc5.metric("Higher Low",  hl_label)
             tc6.metric("ATR(14)", f"${atr_val:.2f}" if atr_val else "-")
 
