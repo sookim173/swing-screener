@@ -239,27 +239,28 @@ def decide_action(
     if weak["weak_count"] >= 3:
         return _action("WEAK_EXIT",
                        f"약화 신호 {weak['weak_count']}개: {', '.join(weak['weak_signals'][:3])}",
-                       unrealized_R)
+                       unrealized_R, weak["weak_signals"])
 
     # 건강도 기반 최종 판정
     grade = health_result.get("health_grade", "CAUTION")
     if grade == "HOLD_TIGHT":
-        return _action("HOLD_TIGHT", "모멘텀 강함, 유지", unrealized_R)
+        return _action("HOLD_TIGHT", "모멘텀 강함, 유지", unrealized_R, weak["weak_signals"])
     elif grade == "HOLD":
-        return _action("HOLD", "구조 유지, 보유", unrealized_R)
+        return _action("HOLD", "구조 유지, 보유", unrealized_R, weak["weak_signals"])
     elif grade == "CAUTION":
-        return _action("CAUTION", f"Health {health_score}/100 — 주시", unrealized_R)
+        return _action("CAUTION", f"Health {health_score}/100 — 주시", unrealized_R, weak["weak_signals"])
     else:
         return _action("WEAK_EXIT",
-                       f"Health {health_score} < 50 → 약화 청산", unrealized_R)
+                       f"Health {health_score} < 50 → 약화 청산", unrealized_R, weak["weak_signals"])
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────
-def _action(action: str, reason: str, unrealized_R: float) -> dict:
+def _action(action: str, reason: str, unrealized_R: float, weak_signals: list = None) -> dict:
     return {
-        "action":       action,
-        "reason":       reason,
-        "unrealized_R": round(unrealized_R, 2),
+        "action":        action,
+        "reason":        reason,
+        "unrealized_R":  round(unrealized_R, 2),
+        "weak_signals":  weak_signals or [],
     }
 
 

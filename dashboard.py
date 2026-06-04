@@ -76,6 +76,93 @@ def action_badge(action: str) -> str:
     return labels.get(action, action)
 
 
+def generate_ai_summary(row: dict) -> str:
+    """
+    포지션 데이터를 바탕으로 한 문단 요약을 생성.
+    LLM 없이 규칙 기반으로 생성.
+    """
+    ticker   = row.get("Ticker", "")
+    action   = row.get("Action", "HOLD")
+    r_val    = row.get("R", 0)
+    rs       = row.get("RS_vs_Sector", 0)
+    rvol     = row.get("RVOL", 0)
+    health   = row.get("Health", 0)
+    trade_age = row.get("Trade_Age", 0)
+    hd       = row.get("Health_Details") or {}
+    weak     = row.get("Weak_Signals") or []
+    remaining_rr = row.get("Remaining_RR", 0)
+
+    strengths = []
+    weaknesses = []
+
+    # 강점 분석
+    if rs > 5:
+        strengths.append(f"강한 RS (+{rs:.0f}%, 섹터 대비 압도적 강세)")
+    elif rs > 0:
+        strengths.append(f"RS 양호 (+{rs:.0f}%)")
+    if hd.get("above_vwap"):
+        strengths.append("VWAP 위 거래 (수급 살아있음)")
+    if hd.get("higher_low"):
+        strengths.append("Higher Low 구조 유지")
+    if hd.get("above_stop"):
+        strengths.append(f"손절선 위 유지")
+    if hd.get("catalyst_intact"):
+        strengths.append("카탈리스트 훼손 없음")
+    if hd.get("sector_strong"):
+        strengths.append("섹터 강세")
+    if rvol >= 2.0:
+        strengths.append(f"거래량 강함 (RVOL {rvol:.1f}x)")
+    if r_val >= 1.0:
+        strengths.append(f"현재 {r_val:.1f}R 수익 중")
+
+    # 약점 분석
+    if rvol < 1.0:
+        weaknesses.append(f"거래량 부족 (RVOL {rvol:.1f}x)")
+    elif rvol < 1.5:
+        weaknesses.append(f"거래량 보통 (RVOL {rvol:.1f}x)")
+    if hd.get("ema_score", 10) < 10:
+        weaknesses.append("EMA8/21 아래 위치")
+    if rs < 0:
+        weaknesses.append(f"RS 약화 ({rs:.0f}%)")
+    if not hd.get("buying_pressure"):
+        weaknesses.append("매수 압력 약함")
+    if not hd.get("room_to_target"):
+        weaknesses.append("목표까지 여유 부족")
+    if trade_age >= 10:
+        weaknesses.append(f"{trade_age}일째 보유 중 (횡보 점검 필요)")
+    for sig in weak:
+        if sig not in " ".join(weaknesses):
+            weaknesses.append(sig)
+
+    # 액션별 결론 문장
+    if action in ("STOP_EXIT", "NEWS_EXIT"):
+        conclusion = "손절 조건 충족 — 즉시 청산 필요."
+    elif action == "WEAK_EXIT":
+        conclusion = "약화 신호 누적 — 청산 또는 포지션 축소 고려."
+    elif action == "TIME_EXIT":
+        conclusion = f"{trade_age}일 보유 중 목표 도달 실패 — 시간 손절 고려."
+    elif action in ("TARGET_EXIT", "PARTIAL_EXIT"):
+        conclusion = "목표가 근접 또는 도달 — 익절 타이밍."
+    elif action == "MOVE_STOP_UP":
+        conclusion = f"{r_val:.1f}R 수익 중 — 손절선 상향으로 이익 보호."
+    elif action == "HOLD_TIGHT":
+        conclusion = f"남은 R:R {remaining_rr:.1f} 유지, 강한 구조 — 손절 고수하며 목표 보유."
+    elif action == "HOLD":
+        conclusion = f"손절선({row.get('Stop', '-')}) 미이탈, 구조 유지 — 보유 지속."
+    else:  # CAUTION
+        conclusion = "건강도 저하 신호 포착 — 손절선 확인 후 주시."
+
+    # 문단 조합
+    parts = []
+    if strengths:
+        parts.append("**강점:** " + ", ".join(strengths[:3]) + ".")
+    if weaknesses:
+        parts.append("**약점:** " + ", ".join(weaknesses[:3]) + ".")
+    parts.append(f"**결론:** {conclusion}")
+
+    return "  \n".join(parts)
+
+
 POSITIONS_FILE = "positions.json"
 
 def load_positions() -> list:
@@ -517,7 +604,13 @@ def run_monitor_cached(positions: list):
             "Conservative_Target": target_price,
             "Suggested_RR":       suggested["suggested_rr"],
             "Target":             target_price,
-            "Shares":        pos.get("shares", 0),
+            # ── 포지션 크기 + Risk $ ──────────────────────────
+            "Shares":           pos.get("shares", 0),
+            "Position_Value":   round(pos.get("shares", 0) * entry, 2),
+            "Risk_Dollars":     round(pos.get("shares", 0) * risk, 2),
+            "Risk_Pct_Account": round(pos.get("shares", 0) * risk / 1000 * 100, 2),
+            # ── Exit signal 상세 ──────────────────────────────
+            "Weak_Signals":  decision.get("weak_signals", []),
             "VWAP":          intraday_ind.get("vwap"),
             "Above_VWAP":    intraday_ind.get("above_vwap"),
             "Above_EMA8":    intraday_ind.get("above_ema8"),
@@ -732,12 +825,61 @@ def render_monitor_tab():
             mc4.metric("Conservative Target", f"${row['Conservative_Target']:.2f}"
                        if row.get('Conservative_Target') else "-")
 
+            # ── AI Summary ────────────────────────────────
+            summary = generate_ai_summary(dict(row))
+            st.info(summary)
+
             # ── Action 판단 ───────────────────────────────
-            st.info(f"**{action_badge(row['Action'])}** — {row['Reason']}")
+            st.markdown(f"**판정:** {action_badge(row['Action'])} — {row['Reason']}")
             if row["Stop_Moved"]:
                 st.success(f"Stop raised: {row['Stop_Reason']}")
-            if row["Health_Issues"]:
-                st.warning(f"Health issues: {row['Health_Issues']}")
+
+            # ── Position Size + Risk $ ────────────────────
+            st.markdown("**포지션 크기**")
+            ps1, ps2, ps3, ps4 = st.columns(4)
+            shares   = row.get("Shares", 0)
+            pos_val  = row.get("Position_Value", 0)
+            risk_usd = row.get("Risk_Dollars", 0)
+            risk_pct = row.get("Risk_Pct_Account", 0)
+            ps1.metric("보유 주수",     f"{shares} shares")
+            ps2.metric("포지션 규모",   f"${pos_val:,.0f}")
+            ps3.metric("리스크 금액",   f"${risk_usd:.2f}",
+                       help="shares × risk_per_share (손절 시 예상 손실)")
+            ps4.metric("계좌 리스크",   f"{risk_pct:.1f}%",
+                       delta="⚠ 과다" if risk_pct > 3 else "적정",
+                       delta_color="inverse" if risk_pct > 3 else "normal",
+                       help="리스크 금액 / 계좌 잔고($1,000)")
+
+            # ── Exit Signal 상세 ──────────────────────────
+            st.markdown("**Exit Signal 체크리스트**")
+            # 모든 가능한 약화 신호 정의
+            all_signal_defs = [
+                ("VWAP 아래 종가",         "above_vwap",        True,  "VWAP 이탈"),
+                ("Higher Low 깨짐",        "higher_low",        True,  "고점저점 구조 붕괴"),
+                ("EMA8/21 아래",           "ema_score",         False, "단기 추세 이탈"),
+                ("매수 압력 약함",          "buying_pressure",   True,  "매도 우위"),
+                ("RS 약화",               "rs_strong",         True,  "시장 대비 약세"),
+                ("섹터 약화",              "sector_strong",     True,  "섹터 ETF 하락"),
+                ("손절 위반",              "above_stop",        True,  "구조적 손절 이탈"),
+            ]
+            hd       = row.get("Health_Details") or {}
+            weak_set = set(row.get("Weak_Signals") or [])
+            sig_cols = st.columns(len(all_signal_defs))
+            for col_i, (label, hd_key, good_val, tooltip) in enumerate(all_signal_defs):
+                if hd_key == "ema_score":
+                    triggered = hd.get(hd_key, 10) < 10
+                else:
+                    triggered = hd.get(hd_key, good_val) != good_val
+                # weak_signals에도 있으면 triggered
+                for ws in weak_set:
+                    if label[:4] in ws:
+                        triggered = True
+                        break
+                sig_cols[col_i].metric(
+                    label,
+                    "🔴 위험" if triggered else "🟢 정상",
+                    help=tooltip
+                )
 
             # ── 보완 2: RVOL + RS vs Sector ──────────────
             st.markdown("**모멘텀 지표**")
