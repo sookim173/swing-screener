@@ -603,10 +603,11 @@ def run_monitor_cached(positions: list):
             "Stop_Moved":         stop_result["stop_moved"],
             "Stop_Reason":        stop_result["stop_reason"],
             # 자동 계산 Stop
-            "Suggested_Stop":     suggested["suggested_stop"],
-            "Structural_Stop":    suggested["structural_stop"],
-            "ATR_Stop":           suggested["atr_stop"],
-            "VWAP_Stop":          suggested["vwap_stop"],
+            "Suggested_Stop":        suggested["suggested_stop"],
+            "Suggested_Stop_Source": suggested.get("suggested_stop_source", "-"),
+            "Structural_Stop":       suggested["structural_stop"],
+            "ATR_Stop":              suggested["atr_stop"],
+            "VWAP_Stop":             suggested["vwap_stop"],
             # 자동 계산 Target
             "RR_Target":          suggested["rr_target"],
             "ATR_Target":         suggested["atr_target"],
@@ -625,6 +626,12 @@ def run_monitor_cached(positions: list):
             "Above_VWAP":    intraday_ind.get("above_vwap"),
             "Above_EMA8":    intraday_ind.get("above_ema8"),
             "HL_5m":         intraday_ind.get("higher_low_5m"),
+            "HL_Prev_Low":   intraday_ind.get("prev_low_price"),
+            "HL_Curr_Low":   intraday_ind.get("curr_low_price"),
+            # ── Technical / News 상태 분리 ────────────────────
+            "Technical_Grade": health["health_grade"],
+            "News_Exit":       decision["action"] in {"NEWS_EXIT"},
+            "News_Reason":     decision["reason"] if decision["action"] == "NEWS_EXIT" else "",
             "Market_Score":  market_score,
             "Sector_Strong": sector_strong,
             "Reason":        decision["reason"],
@@ -835,14 +842,46 @@ def render_monitor_tab():
             mc4.metric("Conservative Target", f"${row['Conservative_Target']:.2f}"
                        if row.get('Conservative_Target') else "-")
 
+            # ── Technical / Fundamental 상태 분리 표시 ──────
+            tech_grade = row.get("Technical_Grade", "HOLD")
+            news_exit  = row.get("News_Exit", False)
+            tech_badge = action_badge(tech_grade)
+            tech_color = {"HOLD_TIGHT": "success", "HOLD": "success",
+                          "CAUTION": "warning", "WEAK_EXIT": "error"}.get(tech_grade, "info")
+
+            ts1, ts2, ts3 = st.columns(3)
+            with ts1:
+                st.markdown("**기술적 상태 (차트)**")
+                if tech_color == "success":
+                    st.success(tech_badge)
+                elif tech_color == "warning":
+                    st.warning(tech_badge)
+                else:
+                    st.error(tech_badge)
+            with ts2:
+                st.markdown("**펀더멘털 상태 (뉴스)**")
+                if news_exit:
+                    st.error(f"🚨 EXIT — {row.get('News_Reason', '')[:60]}")
+                else:
+                    st.success("✅ 이상 없음")
+            with ts3:
+                st.markdown("**종합 판정**")
+                # 뉴스 EXIT이지만 차트가 HOLD면 REDUCE, 둘 다 나쁘면 EXIT
+                if news_exit and tech_grade in ("HOLD_TIGHT", "HOLD"):
+                    st.warning("⚠️ REDUCE — 차트 유지 / 뉴스 위험")
+                elif news_exit:
+                    st.error(f"🛑 EXIT — {action_badge(row['Action'])}")
+                elif tech_grade in ("HOLD_TIGHT", "HOLD"):
+                    st.success(f"{action_badge(row['Action'])} — {row['Reason']}")
+                else:
+                    st.warning(f"{action_badge(row['Action'])} — {row['Reason']}")
+
+            if row["Stop_Moved"]:
+                st.success(f"📈 Stop raised: {row['Stop_Reason']}")
+
             # ── AI Summary ────────────────────────────────
             summary = generate_ai_summary(dict(row))
             st.info(summary)
-
-            # ── Action 판단 ───────────────────────────────
-            st.markdown(f"**판정:** {action_badge(row['Action'])} — {row['Reason']}")
-            if row["Stop_Moved"]:
-                st.success(f"Stop raised: {row['Stop_Reason']}")
 
             # ── Position Size + Risk $ ────────────────────
             st.markdown("**포지션 크기**")
@@ -951,18 +990,31 @@ def render_monitor_tab():
                                       delta="✅" if earned == max_pts else "❌",
                                       delta_color="normal" if earned == max_pts else "inverse")
 
-            # ── Stop 분석 ─────────────────────────────────
+            # ── Stop 분석 (계층화) ────────────────────────
             st.markdown("**Stop 분석**")
+            stop_source = row.get("Suggested_Stop_Source", "-")
             sc1, sc2, sc3 = st.columns(3)
-            sc1.metric("구조적 손절",  f"${row.get('Structural_Stop', '-'):.2f}"
-                       if row.get('Structural_Stop') else "-",
-                       help="차트 패턴 기반 (Swing Low / Breakout Level)")
-            sc2.metric("ATR 손절",     f"${row.get('ATR_Stop', '-'):.2f}"
-                       if row.get('ATR_Stop') else "-",
-                       help="entry - ATR × 1.5 (변동성 기반)")
-            sc3.metric("VWAP 손절",    f"${row.get('VWAP_Stop', '-'):.2f}"
-                       if row.get('VWAP_Stop') else "-",
-                       help="VWAP - 0.5% (당일 수급 기준)")
+            # 현재 활성 손절: 채택된 stop + 근거 표시
+            sc1.metric(f"🟢 현재 활성 손절",
+                       f"${row.get('Stop', '-'):.2f}",
+                       delta=f"기준: {stop_source}",
+                       delta_color="off",
+                       help="현재 실제 적용 중인 손절선. 오른쪽 기준값으로 선정됨.")
+            # 비상 손절: 구조적 손절 (더 아래)
+            sc2.metric("🔴 비상 손절 (구조 붕괴)",
+                       f"${row.get('Structural_Stop', '-'):.2f}",
+                       help="차트 패턴 기반 구조적 손절. 이탈 시 트렌드 붕괴 의미.")
+            # 참고: 세 손절선 모두 표시
+            with sc3:
+                st.markdown("**참고 손절선**")
+                st.markdown(
+                    f"ATR: **${row.get('ATR_Stop', 0):.2f}**  "
+                    f"{'← 활성' if stop_source == 'ATR 손절' else ''}  \n"
+                    f"VWAP: **${row.get('VWAP_Stop', 0):.2f}**  "
+                    f"{'← 활성' if stop_source == 'VWAP 손절' else ''}  \n"
+                    f"구조: **${row.get('Structural_Stop', 0):.2f}**  "
+                    f"{'← 활성' if stop_source == '구조적 손절' else ''}"
+                )
 
             # ── Target 분석 ───────────────────────────────
             st.markdown("**Target 분석**")
@@ -1000,7 +1052,18 @@ def render_monitor_tab():
                                "✅" if row.get("Above_EMA21") else "❌",
                                help=f"EMA21: ${row.get('EMA21_Val', 0):.2f}" if row.get('EMA21_Val') else None)
             ind_cols[3].metric("Above EMA8",  "✅" if row["Above_EMA8"] else "❌")
-            ind_cols[4].metric("Higher Low",  "✅" if row["HL_5m"] else "❌")
+            prev_low = row.get("HL_Prev_Low")
+            curr_low = row.get("HL_Curr_Low")
+            hl_ok    = row.get("HL_5m", False)
+            hl_delta = (f"직전 ${prev_low:.2f} → 현재 ${curr_low:.2f}"
+                        if prev_low and curr_low else None)
+            ind_cols[4].metric(
+                "Higher Low",
+                "✅ 유지" if hl_ok else "❌ 붕괴",
+                delta=hl_delta,
+                delta_color="normal" if hl_ok else "inverse",
+                help="직전 저점 대비 현재 저점. 붕괴 시 구조 약화."
+            )
             ind_cols[5].metric("ATR(14)",
                                f"${atr_val:.2f}" if atr_val else "-",
                                help="14일 Average True Range. 일일 예상 변동폭")

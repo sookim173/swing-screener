@@ -57,12 +57,19 @@ def calculate_suggested_stops(
     # ── 3. VWAP 기반 손절 ────────────────────────────────────
     vwap_stop = round(vwap * 0.995, 2)
 
-    # ── 최적 Stop: entry에 가장 가까운 값 (단, entry보다 낮아야) ──
-    candidates = [s for s in [structural_stop, atr_stop, vwap_stop] if s < current]
-    if candidates:
-        suggested_stop = max(candidates)   # entry에 가장 가까운 = 가장 큰 값
+    # ── 최적 Stop: entry에 가장 가까운 값 (단, current보다 낮아야) ──
+    stop_candidates = {
+        "구조적 손절": structural_stop,
+        "ATR 손절":   atr_stop,
+        "VWAP 손절":  vwap_stop,
+    }
+    valid = {name: val for name, val in stop_candidates.items() if val < current}
+    if valid:
+        suggested_stop_name = max(valid, key=lambda k: valid[k])
+        suggested_stop      = valid[suggested_stop_name]
     else:
-        suggested_stop = atr_stop
+        suggested_stop_name = "ATR 손절"
+        suggested_stop      = atr_stop
 
     # ── risk: entry 기준으로 확정 (current 재계산 금지) ────────
     # pos에 저장된 risk_per_share 우선 사용, 없으면 entry - suggested_stop 으로 산정
@@ -92,10 +99,11 @@ def calculate_suggested_stops(
 
     return {
         # Stop 3가지
-        "structural_stop":   structural_stop,
-        "atr_stop":          atr_stop,
-        "vwap_stop":         vwap_stop,
-        "suggested_stop":    suggested_stop,
+        "structural_stop":      structural_stop,
+        "atr_stop":             atr_stop,
+        "vwap_stop":            vwap_stop,
+        "suggested_stop":       suggested_stop,
+        "suggested_stop_source": suggested_stop_name,  # 어떤 기준이 채택됐는지
 
         # Target 3가지
         "rr_target":          rr_target,

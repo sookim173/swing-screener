@@ -75,10 +75,12 @@ def calculate_intraday_indicators(df: pd.DataFrame) -> dict:
     upper_wick_ratio = upper_wick / candle_range if candle_range > 0 else 0
 
     # ── 최근 5개 봉 Higher High / Higher Low ───────────────────
-    recent_highs = high.iloc[-6:].values
-    recent_lows  = low.iloc[-6:].values
-    higher_high  = bool(recent_highs[-1] > recent_highs[-2]) if len(recent_highs) >= 2 else False
-    higher_low   = bool(recent_lows[-1]  > recent_lows[-2])  if len(recent_lows)  >= 2 else False
+    recent_highs  = high.iloc[-6:].values
+    recent_lows   = low.iloc[-6:].values
+    higher_high   = bool(recent_highs[-1] > recent_highs[-2]) if len(recent_highs) >= 2 else False
+    higher_low    = bool(recent_lows[-1]  > recent_lows[-2])  if len(recent_lows)  >= 2 else False
+    prev_hl_price = round(float(recent_lows[-2]), 2) if len(recent_lows) >= 2 else None
+    curr_low_price = round(float(recent_lows[-1]), 2) if len(recent_lows) >= 1 else None
 
     # ── 거래량 분석 ───────────────────────────────────────────
     avg_vol_intraday = float(volume.mean())
@@ -111,6 +113,8 @@ def calculate_intraday_indicators(df: pd.DataFrame) -> dict:
         "upper_wick_ratio":   round(upper_wick_ratio, 3),
         "higher_high_5m":     higher_high,
         "higher_low_5m":      higher_low,
+        "prev_low_price":     prev_hl_price,    # 직전 저점 가격
+        "curr_low_price":     curr_low_price,   # 현재 저점 가격
         "vol_ratio_intraday": round(vol_ratio, 2),
         "buying_pressure":    buying_pressure,
         "prev_day_low_proxy": round(prev_day_low, 2),
