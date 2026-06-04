@@ -374,7 +374,7 @@ def run_monitor_cached(positions: list):
     from config                 import MARKET_ETFS
     from modules.position_manager.intraday_data import get_intraday_df, calculate_intraday_indicators
     from modules.position_manager.health_check  import calculate_health_score
-    from modules.position_manager.stop_tracker  import update_trailing_stop
+    from modules.position_manager.stop_tracker  import update_trailing_stop, calculate_suggested_stops
     from modules.position_manager.exit_rules    import decide_action
 
     market_data  = get_market_data(MARKET_ETFS)
@@ -426,7 +426,18 @@ def run_monitor_cached(positions: list):
         news_list = _get_news(ticker)
         catalyst_intact = _catalyst_ok(news_list)
 
-        # Stop update
+        # 자동 Stop/Target 계산
+        suggested = calculate_suggested_stops(df_daily, daily_ind, intraday_ind, pos)
+
+        # pos에 계산된 값 반영 (저장된 값이 0.01이면 자동 계산값으로 교체)
+        if pos.get("structural_stop", 0) < pos["entry_price"] * 0.5:
+            pos["structural_stop"] = suggested["suggested_stop"]
+        if pos.get("current_stop", 0) < pos["entry_price"] * 0.5:
+            pos["current_stop"] = suggested["suggested_stop"]
+        if pos.get("risk_per_share", 0) <= 0.01:
+            pos["risk_per_share"] = suggested["risk_per_share"]
+
+        # Stop update (trailing)
         stop_result = update_trailing_stop(pos, intraday_ind, daily_ind)
         pos["current_stop"] = stop_result["new_stop"]
 
@@ -458,10 +469,20 @@ def run_monitor_cached(positions: list):
             "Days":          pos.get("entry_date", ""),
             "Health":        health["health_score"],
             "Health_Grade":  health["health_grade"],
-            "Stop":          pos["current_stop"],
-            "Stop_Moved":    stop_result["stop_moved"],
-            "Stop_Reason":   stop_result["stop_reason"],
-            "Target":        pos.get("initial_target"),
+            "Stop":               pos["current_stop"],
+            "Stop_Moved":         stop_result["stop_moved"],
+            "Stop_Reason":        stop_result["stop_reason"],
+            # 자동 계산 Stop
+            "Suggested_Stop":     suggested["suggested_stop"],
+            "Structural_Stop":    suggested["structural_stop"],
+            "ATR_Stop":           suggested["atr_stop"],
+            "VWAP_Stop":          suggested["vwap_stop"],
+            # 자동 계산 Target
+            "RR_Target":          suggested["rr_target"],
+            "Resistance_Target":  suggested["resistance_target"],
+            "Conservative_Target": suggested["conservative_target"],
+            "Suggested_RR":       suggested["suggested_rr"],
+            "Target":             suggested["conservative_target"],
             "Shares":        pos.get("shares", 0),
             "VWAP":          intraday_ind.get("vwap"),
             "Above_VWAP":    intraday_ind.get("above_vwap"),
@@ -526,8 +547,10 @@ def render_monitor_tab():
             shares      = c3.number_input("Shares", min_value=1, step=1)
 
             c4, c5, c6 = st.columns(3)
-            struct_stop = c4.number_input("Structural Stop ($)", min_value=0.01, step=0.01)
-            target      = c5.number_input("Target ($)", min_value=0.01, step=0.01)
+            struct_stop = c4.number_input("Structural Stop ($) — 0 = 자동계산",
+                                          min_value=0.0, step=0.01, value=0.0)
+            target      = c5.number_input("Target ($) — 0 = 자동계산",
+                                          min_value=0.0, step=0.01, value=0.0)
             sector_etf  = c6.selectbox("Sector ETF",
                             ["QQQ","XBI","SMH","IGV","XLF","XLE","XLI","CIBR","URA"])
 
@@ -535,21 +558,23 @@ def render_monitor_tab():
             pattern  = c7.text_input("Pattern", value="Momentum Pullback")
             catalyst = c8.text_input("Catalyst", value="")
 
+            st.caption("💡 Stop/Target을 0으로 두면 Run Monitor 실행 시 차트에서 자동 계산됩니다.")
+
             submitted = st.form_submit_button("Add Position", type="primary")
-            if submitted and ticker and entry_price > 0 and struct_stop > 0:
+            if submitted and ticker and entry_price > 0:
                 existing = [p["ticker"] for p in positions]
                 if ticker in existing:
                     st.warning(f"{ticker} already exists")
                 else:
-                    risk = round(entry_price - struct_stop, 2)
+                    risk = round(entry_price - struct_stop, 2) if struct_stop > 0 else entry_price * 0.05
                     positions.append({
                         "ticker":          ticker,
                         "entry_date":      date.today().isoformat(),
                         "entry_price":     entry_price,
                         "shares":          int(shares),
-                        "structural_stop": struct_stop,
-                        "current_stop":    struct_stop,
-                        "initial_target":  target,
+                        "structural_stop": struct_stop if struct_stop > 0 else 0.0,
+                        "current_stop":    struct_stop if struct_stop > 0 else 0.0,
+                        "initial_target":  target if target > 0 else 0.0,
                         "risk_per_share":  max(risk, 0.01),
                         "pattern":         pattern,
                         "catalyst":        catalyst,
@@ -636,31 +661,57 @@ def render_monitor_tab():
             f"P/L: {pnl_sign}{row['PnL%']:.1f}%  ({row['R']:+.1f}R)",
             expanded=(row["Action"] not in {"HOLD", "CAUTION"})
         ):
-            # Metrics row
+            # ── 기본 메트릭 ──────────────────────────────────
             mc1, mc2, mc3, mc4, mc5 = st.columns(5)
             mc1.metric("Current",  f"${row['Current']:.2f}",
                        delta=f"{pnl_sign}{row['PnL%']:.1f}%")
             mc2.metric("Entry",    f"${row['Entry']:.2f}")
-            mc3.metric("Stop",     f"${row['Stop']:.2f}",
-                       delta="↑ moved" if row["Stop_Moved"] else None,
+            mc3.metric("Active Stop", f"${row['Stop']:.2f}",
+                       delta="↑ raised" if row["Stop_Moved"] else None,
                        delta_color="normal")
-            mc4.metric("Target",   f"${row['Target']:.2f}" if row['Target'] else "-")
+            mc4.metric("Conservative Target", f"${row['Conservative_Target']:.2f}"
+                       if row.get('Conservative_Target') else "-")
             mc5.metric("Health",   f"{row['Health']}/100")
 
-            # Action reason
+            # ── Action 판단 ───────────────────────────────
             st.info(f"**{action_badge(row['Action'])}** — {row['Reason']}")
-
-            # Stop move reason
             if row["Stop_Moved"]:
                 st.success(f"Stop raised: {row['Stop_Reason']}")
-
-            # Health issues
             if row["Health_Issues"]:
                 st.warning(f"Health issues: {row['Health_Issues']}")
 
-            # Indicator pills
+            # ── 자동 계산 Stop 비교 ───────────────────────
+            st.markdown("**Stop 분석**")
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("구조적 손절",  f"${row.get('Structural_Stop', '-'):.2f}"
+                       if row.get('Structural_Stop') else "-",
+                       help="차트 패턴 기반 (Swing Low / Breakout Level)")
+            sc2.metric("ATR 손절",     f"${row.get('ATR_Stop', '-'):.2f}"
+                       if row.get('ATR_Stop') else "-",
+                       help="entry - ATR × 1.5 (변동성 기반)")
+            sc3.metric("VWAP 손절",    f"${row.get('VWAP_Stop', '-'):.2f}"
+                       if row.get('VWAP_Stop') else "-",
+                       help="VWAP - 0.5% (당일 수급 기준)")
+
+            # ── 자동 계산 Target 비교 ─────────────────────
+            st.markdown("**Target 분석**")
+            tc1, tc2, tc3 = st.columns(3)
+            tc1.metric("R:R 2.5 목표",   f"${row.get('RR_Target', '-'):.2f}"
+                       if row.get('RR_Target') else "-",
+                       help="현재가 + risk × 2.5")
+            tc2.metric("저항선 목표",    f"${row.get('Resistance_Target', '-'):.2f}"
+                       if row.get('Resistance_Target') else "-",
+                       help="20일 고점 / 52주 고점 중 가까운 저항선")
+            tc3.metric("보수적 목표",    f"${row.get('Conservative_Target', '-'):.2f}"
+                       if row.get('Conservative_Target') else "-",
+                       delta=f"R:R {row.get('Suggested_RR', 0):.1f}",
+                       delta_color="normal",
+                       help="두 목표 중 낮은 값 (현실적 목표)")
+
+            # ── 5분봉 기술적 지표 ─────────────────────────
+            st.markdown("**기술적 지표 (5분봉)**")
             ind_cols = st.columns(5)
-            ind_cols[0].metric("VWAP",    f"${row['VWAP']:.2f}" if row['VWAP'] else "-")
+            ind_cols[0].metric("VWAP",       f"${row['VWAP']:.2f}" if row['VWAP'] else "-")
             ind_cols[1].metric("Above VWAP", "✅" if row["Above_VWAP"] else "❌")
             ind_cols[2].metric("Above EMA8", "✅" if row["Above_EMA8"] else "❌")
             ind_cols[3].metric("Higher Low", "✅" if row["HL_5m"] else "❌")
