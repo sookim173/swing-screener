@@ -36,6 +36,20 @@ st.markdown("""
 .action-HOLD_TIGHT   { background:#0d47a1; color:white; padding:2px 8px; border-radius:4px; font-weight:bold; }
 .action-HOLD         { background:#1976d2; color:white; padding:2px 8px; border-radius:4px; }
 .action-CAUTION      { background:#6d4c41; color:white; padding:2px 8px; border-radius:4px; }
+
+/* Signal chip grid */
+.sig-chip {
+    display:inline-block; padding:3px 10px; border-radius:12px;
+    font-size:0.78rem; font-weight:600; margin:2px;
+}
+.sig-ok   { background:#1b5e2044; border:1px solid #2e7d32; color:#81c784; }
+.sig-warn { background:#b71c1c33; border:1px solid #c62828; color:#ef9a9a; }
+
+/* Section divider */
+.sec-label {
+    font-size:0.72rem; font-weight:700; letter-spacing:.08em;
+    color:#888; text-transform:uppercase; margin:8px 0 4px 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -800,273 +814,202 @@ def render_monitor_tab():
         pnl_sign  = "+" if row["PnL%"] >= 0 else ""
         trade_age = row.get("Trade_Age", 0)
         r_val     = row.get("R", 0)
+        rr_left   = row.get("Remaining_RR", 0)
+        hd        = row.get("Health_Details") or {}
 
         with st.expander(
             f"{col_color} **{row['Ticker']}**  |  "
             f"{action_badge(row['Action'])}  |  "
             f"Day {trade_age}  |  "
-            f"P/L: {pnl_sign}{row['PnL%']:.1f}%  ({r_val:+.2f}R)",
+            f"P/L {pnl_sign}{row['PnL%']:.1f}%  ({r_val:+.2f}R)  |  "
+            f"Health {row['Health']}/100",
             expanded=(row["Action"] not in {"HOLD", "CAUTION"})
         ):
-            # ── 보완 1: Current R + Remaining R:R (최상단 강조) ──
-            r_color = "normal" if r_val >= 0 else "inverse"
-            rr_left = row.get("Remaining_RR", 0)
-            hc1, hc2, hc3, hc4, hc5 = st.columns(5)
-            hc1.metric("Current R",
-                       f"{r_val:+.2f}R",
-                       help="(현재가 - 진입가) / risk_per_share")
-            hc2.metric("남은 R:R",
-                       f"{rr_left:.1f} : 1" if rr_left > 0 else "-",
-                       help="(목표 - 현재가) / (현재가 - 현재손절)")
-            hc3.metric("남은 상승여력",
-                       f"+{row.get('Remaining_Upside', 0):.1f}%" if row.get('Remaining_Upside', 0) > 0 else "-")
-            hc4.metric("Trade Age",
-                       f"Day {trade_age}",
-                       delta="⚠ 횡보 점검" if trade_age >= 10 else None,
-                       delta_color="inverse" if trade_age >= 10 else "normal",
-                       help="진입일 기준 보유일수. 10일 이상 횡보 시 청산 고려.")
-            hc5.metric("Health",
-                       f"{row['Health']}/100",
-                       delta=row['Health_Grade'])
 
-            st.markdown("---")
+            # ════ ROW 1: 핵심 숫자 ════════════════════════
+            r1c1, r1c2, r1c3, r1c4, r1c5, r1c6 = st.columns(6)
+            r1c1.metric("현재가",  f"${row['Current']:.2f}",
+                        delta=f"{pnl_sign}{row['PnL%']:.1f}%")
+            r1c2.metric("진입가",  f"${row['Entry']:.2f}")
+            r1c3.metric("활성 손절",
+                        f"${row['Stop']:.2f}",
+                        delta=f"↑ {row['Stop_Reason']}" if row["Stop_Moved"] else
+                              f"기준: {row.get('Suggested_Stop_Source','')}",
+                        delta_color="normal" if row["Stop_Moved"] else "off")
+            r1c4.metric("목표가",  f"${row.get('Conservative_Target', 0):.2f}",
+                        delta=f"남은 상승 +{row.get('Remaining_Upside',0):.1f}%",
+                        delta_color="normal")
+            r1c5.metric("Current R", f"{r_val:+.2f}R",
+                        delta="수익 중" if r_val > 0 else ("손실" if r_val < -0.5 else "진입 초기"),
+                        delta_color="normal" if r_val > 0 else "inverse")
+            r1c6.metric("남은 R:R",
+                        f"{rr_left:.1f}:1" if rr_left > 0 else "-",
+                        delta=f"Day {trade_age}" + (" ⚠ 횡보" if trade_age >= 10 else ""),
+                        delta_color="inverse" if trade_age >= 10 else "off")
 
-            # ── 기본 메트릭 ──────────────────────────────────
-            mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("Current",  f"${row['Current']:.2f}",
-                       delta=f"{pnl_sign}{row['PnL%']:.1f}%")
-            mc2.metric("Entry",    f"${row['Entry']:.2f}")
-            mc3.metric("Active Stop", f"${row['Stop']:.2f}",
-                       delta="↑ raised" if row["Stop_Moved"] else None,
-                       delta_color="normal")
-            mc4.metric("Conservative Target", f"${row['Conservative_Target']:.2f}"
-                       if row.get('Conservative_Target') else "-")
-
-            # ── Technical / Fundamental 상태 분리 표시 ──────
+            # ════ ROW 2: 판정 3분할 + AI Summary ═════════
             tech_grade = row.get("Technical_Grade", "HOLD")
             news_exit  = row.get("News_Exit", False)
-            tech_badge = action_badge(tech_grade)
             tech_color = {"HOLD_TIGHT": "success", "HOLD": "success",
                           "CAUTION": "warning", "WEAK_EXIT": "error"}.get(tech_grade, "info")
 
-            ts1, ts2, ts3 = st.columns(3)
+            ts1, ts2, ts3 = st.columns([1, 1, 2])
             with ts1:
-                st.markdown("**기술적 상태 (차트)**")
-                if tech_color == "success":
-                    st.success(tech_badge)
-                elif tech_color == "warning":
-                    st.warning(tech_badge)
-                else:
-                    st.error(tech_badge)
+                st.markdown('<p class="sec-label">차트 상태</p>', unsafe_allow_html=True)
+                fn = {"success": st.success, "warning": st.warning, "error": st.error}.get(tech_color, st.info)
+                fn(action_badge(tech_grade))
             with ts2:
-                st.markdown("**펀더멘털 상태 (뉴스)**")
+                st.markdown('<p class="sec-label">뉴스 상태</p>', unsafe_allow_html=True)
                 if news_exit:
-                    st.error(f"🚨 EXIT — {row.get('News_Reason', '')[:60]}")
+                    st.error(f"🚨 위험 — {row.get('News_Reason','')[:50]}")
                 else:
                     st.success("✅ 이상 없음")
             with ts3:
-                st.markdown("**종합 판정**")
-                # 뉴스 EXIT이지만 차트가 HOLD면 REDUCE, 둘 다 나쁘면 EXIT
+                st.markdown('<p class="sec-label">AI 요약</p>', unsafe_allow_html=True)
+                summary = generate_ai_summary(dict(row))
                 if news_exit and tech_grade in ("HOLD_TIGHT", "HOLD"):
-                    st.warning("⚠️ REDUCE — 차트 유지 / 뉴스 위험")
-                elif news_exit:
-                    st.error(f"🛑 EXIT — {action_badge(row['Action'])}")
-                elif tech_grade in ("HOLD_TIGHT", "HOLD"):
-                    st.success(f"{action_badge(row['Action'])} — {row['Reason']}")
+                    st.warning(f"⚠️ **REDUCE** — {summary}")
+                elif tech_grade in ("HOLD_TIGHT", "HOLD") and not news_exit:
+                    st.success(summary)
                 else:
-                    st.warning(f"{action_badge(row['Action'])} — {row['Reason']}")
+                    st.warning(summary)
 
-            if row["Stop_Moved"]:
-                st.success(f"📈 Stop raised: {row['Stop_Reason']}")
+            # ════ ROW 3: 좌(신호+모멘텀) / 우(손절+목표+포지션) ═
+            left_col, right_col = st.columns([3, 2])
 
-            # ── AI Summary ────────────────────────────────
-            summary = generate_ai_summary(dict(row))
-            st.info(summary)
+            with left_col:
+                # ── 신호 칩 그리드 ──────────────────────
+                st.markdown('<p class="sec-label">신호 체크</p>', unsafe_allow_html=True)
+                signal_defs = [
+                    ("손절 위",   "above_stop",      True),
+                    ("VWAP",      "above_vwap",       True),
+                    ("EMA21",     "above_ema21",      True),
+                    ("Higher Low","higher_low",        True),
+                    ("RS",        "rs_strong",         True),
+                    ("RVOL",      "rvol_ok",           True),
+                    ("매수압력",  "buying_pressure",   True),
+                    ("섹터",      "sector_strong",     True),
+                    ("카탈",      "catalyst_intact",   True),
+                ]
+                chips_html = ""
+                for label, key, good in signal_defs:
+                    ok = hd.get(key, good) == good
+                    cls = "sig-ok" if ok else "sig-warn"
+                    icon = "✓" if ok else "✗"
+                    chips_html += f'<span class="sig-chip {cls}">{icon} {label}</span>'
+                st.markdown(chips_html, unsafe_allow_html=True)
 
-            # ── Position Size + Risk $ ────────────────────
-            st.markdown("**포지션 크기**")
-            ps1, ps2, ps3, ps4 = st.columns(4)
-            shares   = row.get("Shares", 0)
-            pos_val  = row.get("Position_Value", 0)
-            risk_usd = row.get("Risk_Dollars", 0)
-            risk_pct = row.get("Risk_Pct_Account", 0)
-            ps1.metric("보유 주수",     f"{shares} shares")
-            ps2.metric("포지션 규모",   f"${pos_val:,.0f}")
-            ps3.metric("리스크 금액",   f"${risk_usd:.2f}",
-                       help="shares × risk_per_share (손절 시 예상 손실)")
-            ps4.metric("계좌 리스크",   f"{risk_pct:.1f}%",
-                       delta="⚠ 과다" if risk_pct > 3 else "적정",
-                       delta_color="inverse" if risk_pct > 3 else "normal",
-                       help="리스크 금액 / 계좌 잔고($1,000)")
-
-            # ── Exit Signal 상세 ──────────────────────────
-            st.markdown("**Exit Signal 체크리스트**")
-            # 모든 가능한 약화 신호 정의
-            all_signal_defs = [
-                ("손절 위반",    "above_stop",    True,  "구조적 손절 이탈"),
-                ("VWAP 이탈",   "above_vwap",    True,  "VWAP 아래 종가"),
-                ("EMA21 이탈",  "above_ema21",   True,  "스윙 추세 붕괴"),
-                ("Higher Low↓", "higher_low",    True,  "고점저점 구조 붕괴"),
-                ("RS 약화",     "rs_strong",     True,  "시장 대비 약세"),
-                ("RVOL 부족",   "rvol_ok",       True,  "거래량 모멘텀 없음"),
-                ("매수압력↓",   "buying_pressure",True, "매도 우위"),
-                ("섹터 약화",   "sector_strong", True,  "섹터 ETF 하락"),
-            ]
-            hd       = row.get("Health_Details") or {}
-            weak_set = set(row.get("Weak_Signals") or [])
-            sig_cols = st.columns(len(all_signal_defs))
-            for col_i, (label, hd_key, good_val, tooltip) in enumerate(all_signal_defs):
-                if hd_key == "ema_score":
-                    triggered = hd.get(hd_key, 10) < 10
-                else:
-                    triggered = hd.get(hd_key, good_val) != good_val
-                # weak_signals에도 있으면 triggered
-                for ws in weak_set:
-                    if label[:4] in ws:
-                        triggered = True
-                        break
-                sig_cols[col_i].metric(
-                    label,
-                    "🔴 위험" if triggered else "🟢 정상",
-                    help=tooltip
-                )
-
-            # ── RVOL + RS vs Sector ───────────────────────
-            st.markdown("**모멘텀 지표**")
-            mo1, mo2, mo3, mo4, mo5 = st.columns(5)
-            rvol     = row.get("RVOL", 0)
-            rvol_3d  = row.get("RVOL_3d", 0)
-            rvol_5d  = row.get("RVOL_5d", 0)
-            rs       = row.get("RS_vs_Sector", 0)
-            rvol_label = "Strong" if rvol >= 2.0 else ("Weak" if rvol < 1.0 else "Normal")
-            # RVOL 추세: 오늘 > 3일 > 5일 이면 증가 추세
-            rvol_trend = "↑ 증가" if rvol >= rvol_3d >= rvol_5d else ("↓ 감소" if rvol <= rvol_3d else "→ 보통")
-            rs_label   = "Strong" if rs > 0 else "Weak"
-            mo1.metric("RVOL (오늘)",
-                       f"{rvol:.1f}x",
-                       delta=rvol_label,
-                       delta_color="normal" if rvol >= 1.0 else "inverse",
-                       help="오늘 거래량 / 20일 평균 거래량")
-            mo2.metric("RVOL 3일 평균",
-                       f"{rvol_3d:.1f}x",
-                       help="최근 3일 RVOL 평균")
-            mo3.metric("RVOL 5일 추세",
-                       f"{rvol_5d:.1f}x",
-                       delta=rvol_trend,
-                       delta_color="normal" if "증가" in rvol_trend else "inverse",
-                       help="오늘>3일>5일이면 거래량 증가 추세")
-            mo4.metric(f"RS vs {row.get('Sector_ETF','QQQ')}",
-                       f"{rs:+.1f}%",
-                       delta=rs_label,
-                       delta_color="normal" if rs > 0 else "inverse",
-                       help=f"20일 수익률 차이. 종목 {row.get('Ticker_Ret20d',0):+.1f}% / {row.get('Sector_ETF','QQQ')} {row.get('Sector_Ret20d',0):+.1f}%")
-            mo5.metric("Sector",
-                       "✅ Strong" if row["Sector_Strong"] else "❌ Weak")
-
-            # ── 보완 3: Health Score 세부 분해 ───────────
-            st.markdown("**Health Score 분해**")
-            hd = row.get("Health_Details") or {}
-            # (label, hd_key, max_pts, is_numeric)
-            score_map = [
-                ("손절 위",    "above_stop",      15, False),
-                ("VWAP 위",   "above_vwap",       12, False),
-                ("RS 강도",   "rs_strong",         12, False),
-                ("Higher Low","higher_low",        12, False),
-                ("EMA21",     "above_ema21",        8, False),
-                ("카탈리스트", "catalyst_intact",  10, False),
-                ("RVOL",      "rvol_ok",            8, False),
-                ("매수압력",  "buying_pressure",    8, False),
-                ("EMA8",      "above_ema8",          4, False),
-                ("섹터강도",  "sector_strong",       5, False),
-                ("목표여유",  "room_to_target",      5, False),
-                ("캔들품질",  "clean_candle",        4, False),
-            ]
-            hd_cols = st.columns(len(score_map))
-            for col_i, (label, key, max_pts, _) in enumerate(score_map):
-                val    = hd.get(key, False)
-                earned = max_pts if val else 0
-                hd_cols[col_i].metric(label,
-                                      f"{earned}/{max_pts}",
-                                      delta="✅" if earned == max_pts else "❌",
-                                      delta_color="normal" if earned == max_pts else "inverse")
-
-            # ── Stop 분석 (계층화) ────────────────────────
-            st.markdown("**Stop 분석**")
-            stop_source = row.get("Suggested_Stop_Source", "-")
-            sc1, sc2, sc3 = st.columns(3)
-            # 현재 활성 손절: 채택된 stop + 근거 표시
-            sc1.metric(f"🟢 현재 활성 손절",
-                       f"${row.get('Stop', '-'):.2f}",
-                       delta=f"기준: {stop_source}",
-                       delta_color="off",
-                       help="현재 실제 적용 중인 손절선. 오른쪽 기준값으로 선정됨.")
-            # 비상 손절: 구조적 손절 (더 아래)
-            sc2.metric("🔴 비상 손절 (구조 붕괴)",
-                       f"${row.get('Structural_Stop', '-'):.2f}",
-                       help="차트 패턴 기반 구조적 손절. 이탈 시 트렌드 붕괴 의미.")
-            # 참고: 세 손절선 모두 표시
-            with sc3:
-                st.markdown("**참고 손절선**")
+                # ── 모멘텀 수치 (한 줄) ─────────────────
+                st.markdown('<p class="sec-label" style="margin-top:12px">모멘텀</p>', unsafe_allow_html=True)
+                rvol    = row.get("RVOL", 0)
+                rvol_3d = row.get("RVOL_3d", 0)
+                rvol_5d = row.get("RVOL_5d", 0)
+                rs      = row.get("RS_vs_Sector", 0)
+                rvol_trend = "↑" if rvol >= rvol_3d >= rvol_5d else ("↓" if rvol <= rvol_5d else "→")
+                rvol_color = "#81c784" if rvol >= 1.5 else ("#ef9a9a" if rvol < 1.0 else "#fff176")
+                rs_color   = "#81c784" if rs > 0 else "#ef9a9a"
+                etf = row.get("Sector_ETF", "QQQ")
                 st.markdown(
-                    f"ATR: **${row.get('ATR_Stop', 0):.2f}**  "
-                    f"{'← 활성' if stop_source == 'ATR 손절' else ''}  \n"
-                    f"VWAP: **${row.get('VWAP_Stop', 0):.2f}**  "
-                    f"{'← 활성' if stop_source == 'VWAP 손절' else ''}  \n"
-                    f"구조: **${row.get('Structural_Stop', 0):.2f}**  "
-                    f"{'← 활성' if stop_source == '구조적 손절' else ''}"
+                    f'<span style="color:{rvol_color};font-size:.9rem">RVOL {rvol:.1f}x {rvol_trend} '
+                    f'<span style="color:#888">(3d:{rvol_3d:.1f} 5d:{rvol_5d:.1f})</span></span>'
+                    f'&nbsp;&nbsp;&nbsp;'
+                    f'<span style="color:{rs_color};font-size:.9rem">RS vs {etf} {rs:+.1f}% '
+                    f'<span style="color:#888">({row.get("Ticker_Ret20d",0):+.1f}% vs {row.get("Sector_Ret20d",0):+.1f}%)</span></span>',
+                    unsafe_allow_html=True
                 )
 
-            # ── Target 분석 ───────────────────────────────
-            st.markdown("**Target 분석**")
-            tc1, tc2, tc3, tc4 = st.columns(4)
-            tc1.metric("R:R 2.5 목표",   f"${row.get('RR_Target', '-'):.2f}"
-                       if row.get('RR_Target') else "-",
-                       help="entry + (entry - stop) × 2.5  ← risk는 진입 시 확정")
-            tc2.metric("ATR 기반 목표",  f"${row.get('ATR_Target', '-'):.2f}"
-                       if row.get('ATR_Target') else "-",
-                       help="entry + ATR × 3.75  (ATR×1.5 손절 전제의 2.5R)")
-            tc3.metric("저항선 목표",    f"${row.get('Resistance_Target', '-'):.2f}"
-                       if row.get('Resistance_Target') else "-",
-                       help="20일 고점 / 52주 고점 중 가까운 저항선")
-            tc4.metric("보수적 목표",    f"${row.get('Conservative_Target', '-'):.2f}"
-                       if row.get('Conservative_Target') else "-",
-                       delta=f"R:R {row.get('Suggested_RR', 0):.1f}",
-                       delta_color="normal",
-                       help="세 목표 중 가장 낮은 값 (현실적 목표)")
+                # ── Health Score 바 ──────────────────────
+                st.markdown('<p class="sec-label" style="margin-top:12px">Health Score</p>', unsafe_allow_html=True)
+                h_score = row["Health"]
+                h_color = "#4caf50" if h_score >= 80 else ("#ff9800" if h_score >= 65 else "#f44336")
+                score_items = [
+                    ("손절위", hd.get("above_stop", False), 15),
+                    ("VWAP",   hd.get("above_vwap", False), 12),
+                    ("RS",     hd.get("rs_strong", False), 12),
+                    ("HL",     hd.get("higher_low", False), 12),
+                    ("EMA21",  hd.get("above_ema21", False), 8),
+                    ("카탈",   hd.get("catalyst_intact", False), 10),
+                    ("RVOL",   hd.get("rvol_ok", False), 8),
+                    ("압력",   hd.get("buying_pressure", False), 8),
+                ]
+                earned_total = sum(pts for _, ok, pts in score_items if ok)
+                breakdown = " · ".join(
+                    f'<span style="color:{"#81c784" if ok else "#ef9a9a"}">{lbl} {pts if ok else 0}/{pts}</span>'
+                    for lbl, ok, pts in score_items
+                )
+                st.markdown(
+                    f'<span style="color:{h_color};font-size:1.1rem;font-weight:700">{h_score}/100 {row["Health_Grade"]}</span>'
+                    f'<br><span style="font-size:.75rem">{breakdown}</span>',
+                    unsafe_allow_html=True
+                )
 
-            # ── 5분봉 기술적 지표 ─────────────────────────
-            st.markdown("**기술적 지표 (5분봉)**")
-            ind_cols = st.columns(6)
-            vwap_val      = row.get("VWAP", 0)
-            vwap_dist     = row.get("VWAP_Dist_Pct", 0)
-            atr_val       = row.get("ATR_Val", 0)
-            vwap_dist_str = f"{vwap_dist:+.1f}%" if vwap_dist else "-"
-            vwap_warn     = abs(vwap_dist) > 5  # VWAP에서 5% 이상 이탈 시 과열/과매도 경고
-            ind_cols[0].metric("VWAP",
-                               f"${vwap_val:.2f}" if vwap_val else "-",
-                               delta=vwap_dist_str,
-                               delta_color="off" if vwap_warn else "normal",
-                               help="현재가와 VWAP 거리. ±5% 이상이면 과열/과매도 주의")
-            ind_cols[1].metric("Above VWAP", "✅" if row["Above_VWAP"] else "❌")
-            ind_cols[2].metric("Above EMA21",
-                               "✅" if row.get("Above_EMA21") else "❌",
-                               help=f"EMA21: ${row.get('EMA21_Val', 0):.2f}" if row.get('EMA21_Val') else None)
-            ind_cols[3].metric("Above EMA8",  "✅" if row["Above_EMA8"] else "❌")
-            prev_low = row.get("HL_Prev_Low")
-            curr_low = row.get("HL_Curr_Low")
-            hl_ok    = row.get("HL_5m", False)
-            hl_delta = (f"직전 ${prev_low:.2f} → 현재 ${curr_low:.2f}"
-                        if prev_low and curr_low else None)
-            ind_cols[4].metric(
-                "Higher Low",
-                "✅ 유지" if hl_ok else "❌ 붕괴",
-                delta=hl_delta,
-                delta_color="normal" if hl_ok else "inverse",
-                help="직전 저점 대비 현재 저점. 붕괴 시 구조 약화."
+            with right_col:
+                # ── 손절 ────────────────────────────────
+                st.markdown('<p class="sec-label">손절</p>', unsafe_allow_html=True)
+                stop_src = row.get("Suggested_Stop_Source", "-")
+                st.markdown(
+                    f'🟢 **활성** &nbsp; ${row.get("Stop",0):.2f} &nbsp;'
+                    f'<span style="color:#888;font-size:.8rem">({stop_src})</span><br>'
+                    f'🔴 **비상** &nbsp; ${row.get("Structural_Stop",0):.2f} &nbsp;'
+                    f'<span style="color:#888;font-size:.8rem">(구조 붕괴선)</span><br>'
+                    f'<span style="color:#666;font-size:.78rem">'
+                    f'ATR ${row.get("ATR_Stop",0):.2f} &nbsp;|&nbsp; '
+                    f'VWAP ${row.get("VWAP_Stop",0):.2f}</span>',
+                    unsafe_allow_html=True
+                )
+
+                # ── 목표가 ──────────────────────────────
+                st.markdown('<p class="sec-label" style="margin-top:10px">목표가</p>', unsafe_allow_html=True)
+                st.markdown(
+                    f'🎯 **보수적** &nbsp; ${row.get("Conservative_Target",0):.2f} &nbsp;'
+                    f'<span style="color:#888;font-size:.8rem">(R:R {row.get("Suggested_RR",0):.1f})</span><br>'
+                    f'<span style="color:#666;font-size:.78rem">'
+                    f'R:R 2.5 ${row.get("RR_Target",0):.2f} &nbsp;|&nbsp; '
+                    f'ATR ${row.get("ATR_Target",0):.2f} &nbsp;|&nbsp; '
+                    f'저항 ${row.get("Resistance_Target",0):.2f}</span>',
+                    unsafe_allow_html=True
+                )
+
+                # ── 포지션 ──────────────────────────────
+                st.markdown('<p class="sec-label" style="margin-top:10px">포지션</p>', unsafe_allow_html=True)
+                shares   = row.get("Shares", 0)
+                pos_val  = row.get("Position_Value", 0)
+                risk_usd = row.get("Risk_Dollars", 0)
+                risk_pct = row.get("Risk_Pct_Account", 0)
+                risk_color = "#ef9a9a" if risk_pct > 3 else "#81c784"
+                st.markdown(
+                    f'{shares}주 &nbsp; ${pos_val:,.0f} &nbsp;'
+                    f'| Risk <span style="color:{risk_color};font-weight:600">'
+                    f'${risk_usd:.2f} ({risk_pct:.1f}%)</span>',
+                    unsafe_allow_html=True
+                )
+
+            # ════ ROW 4: 기술지표 바 (한 줄) ══════════════
+            st.markdown('<p class="sec-label" style="margin-top:8px">기술지표 (5분봉)</p>', unsafe_allow_html=True)
+            vwap_val  = row.get("VWAP", 0)
+            vwap_dist = row.get("VWAP_Dist_Pct", 0)
+            atr_val   = row.get("ATR_Val", 0)
+            prev_low  = row.get("HL_Prev_Low")
+            curr_low  = row.get("HL_Curr_Low")
+            hl_ok     = row.get("HL_5m", False)
+            hl_str    = (f"${prev_low:.2f}→${curr_low:.2f}" if prev_low and curr_low else "")
+            hl_color  = "#81c784" if hl_ok else "#ef9a9a"
+            vd_color  = "#fff176" if abs(vwap_dist) > 5 else "#81c784" if vwap_dist > 0 else "#ef9a9a"
+            def ind_chip(label, ok):
+                c = "#81c784" if ok else "#ef9a9a"
+                return f'<span style="color:{c};font-size:.85rem;margin-right:12px">{"✅" if ok else "❌"} {label}</span>'
+            st.markdown(
+                f'<span style="color:#888;font-size:.85rem;margin-right:8px">VWAP</span>'
+                f'<span style="color:{vd_color};font-size:.85rem;margin-right:4px">${vwap_val:.2f} ({vwap_dist:+.1f}%)</span>'
+                f'&nbsp;&nbsp;'
+                + ind_chip("EMA21", row.get("Above_EMA21", False))
+                + ind_chip("EMA8",  row.get("Above_EMA8", False))
+                + ind_chip("VWAP",  row.get("Above_VWAP", False))
+                + f'<span style="color:{hl_color};font-size:.85rem;margin-right:12px">'
+                  f'{"✅" if hl_ok else "❌"} Higher Low {hl_str}</span>'
+                + f'<span style="color:#888;font-size:.85rem">ATR ${atr_val:.2f}</span>',
+                unsafe_allow_html=True
             )
-            ind_cols[5].metric("ATR(14)",
-                               f"${atr_val:.2f}" if atr_val else "-",
-                               help="14일 Average True Range. 일일 예상 변동폭")
 
 
 # ════════════════════════════════════════════════════════
