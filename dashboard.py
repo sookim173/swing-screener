@@ -198,6 +198,217 @@ def save_positions(positions: list):
 #  TAB 1: SCREENER
 # ════════════════════════════════════════════════════════
 
+def render_ticker_detail(ticker: str, df: pd.DataFrame):
+    """Screener 후보 티커의 상세 리포트: 차트 + 지표 설명 + 뉴스."""
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from data.price_loader import get_price_data
+
+    row = df[df["Ticker"] == ticker].iloc[0] if not df.empty and ticker in df["Ticker"].values else None
+
+    st.markdown(f"## 📊 {ticker} 상세 리포트")
+
+    # ── 차트 ─────────────────────────────────────────────
+    with st.spinner(f"{ticker} 차트 로드 중..."):
+        price_df = get_price_data(ticker, days=60)
+
+    if price_df is not None and not price_df.empty:
+        # 이동평균 계산
+        price_df["ema8"]  = price_df["close"].ewm(span=8,  adjust=False).mean()
+        price_df["ema21"] = price_df["close"].ewm(span=21, adjust=False).mean()
+        price_df["ema50"] = price_df["close"].ewm(span=50, adjust=False).mean()
+        avg_vol = price_df["volume"].rolling(20).mean()
+
+        fig = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            row_heights=[0.7, 0.3],
+            vertical_spacing=0.03,
+        )
+
+        # 캔들스틱
+        fig.add_trace(go.Candlestick(
+            x=price_df.index,
+            open=price_df["open"], high=price_df["high"],
+            low=price_df["low"],  close=price_df["close"],
+            name=ticker,
+            increasing_line_color="#26a69a",
+            decreasing_line_color="#ef5350",
+        ), row=1, col=1)
+
+        # EMA lines
+        fig.add_trace(go.Scatter(x=price_df.index, y=price_df["ema8"],
+                                  line=dict(color="#ff9800", width=1.2), name="EMA 8"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=price_df.index, y=price_df["ema21"],
+                                  line=dict(color="#42a5f5", width=1.2), name="EMA 21"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=price_df.index, y=price_df["ema50"],
+                                  line=dict(color="#ab47bc", width=1.2, dash="dot"), name="EMA 50"), row=1, col=1)
+
+        # Entry / Stop / Target 라인 (row 데이터가 있으면)
+        if row is not None:
+            entry  = row.get("Entry")
+            stop   = row.get("Stop")
+            target = row.get("Target")
+            x0, x1 = price_df.index[0], price_df.index[-1]
+            if entry:
+                fig.add_hline(y=float(entry), line=dict(color="#42a5f5", dash="dash", width=1.5),
+                              annotation_text=f"Entry ${entry}", row=1, col=1)
+            if stop:
+                fig.add_hline(y=float(stop), line=dict(color="#ef5350", dash="dash", width=1.5),
+                              annotation_text=f"Stop ${stop}", row=1, col=1)
+            if target:
+                fig.add_hline(y=float(target), line=dict(color="#26a69a", dash="dash", width=1.5),
+                              annotation_text=f"Target ${target}", row=1, col=1)
+
+        # 거래량 바
+        colors = ["#26a69a" if c >= o else "#ef5350"
+                  for c, o in zip(price_df["close"], price_df["open"])]
+        fig.add_trace(go.Bar(x=price_df.index, y=price_df["volume"],
+                             marker_color=colors, name="Volume", opacity=0.7), row=2, col=1)
+        fig.add_trace(go.Scatter(x=price_df.index, y=avg_vol,
+                                  line=dict(color="#ffca28", width=1), name="Vol MA20"), row=2, col=1)
+
+        fig.update_layout(
+            height=520,
+            template="plotly_dark",
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(orientation="h", y=1.02, x=0),
+        )
+        fig.update_yaxes(title_text="Price", row=1, col=1)
+        fig.update_yaxes(title_text="Volume", row=2, col=1)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("차트 데이터를 불러올 수 없습니다.")
+
+    # ── 지표 설명 ─────────────────────────────────────────
+    if row is not None:
+        st.markdown("### 📋 지표 해설")
+
+        METRIC_EXPLANATIONS = {
+            "Score":     ("점수 (0~100)", "스크리너가 계산한 종합 점수. 75+ = 진입 검토, 85+ = 고품질 셋업."),
+            "Grade":     ("등급 (A~D)",   "A: 85+, B: 75~85, C: 65~75, D: 65 미만. 전반적인 셋업 품질."),
+            "Pattern":   ("차트 패턴",    "감지된 기술적 패턴. Bull Flag, Momentum Pullback, Cup Base 등."),
+            "RVOL":      ("상대거래량 (당일)", "오늘 거래량 ÷ 20일 평균. 1.5x+ = 강한 관심, 2x+ = 점화 신호."),
+            "RVOL_3D":   ("RVOL 3일 평균", "최근 3일 RVOL 평균. 추세적 거래량 증가 여부 확인."),
+            "5D%":       ("5일 수익률",   "최근 5거래일 가격 변화율. 단기 모멘텀 강도."),
+            "RS_QQQ":    ("QQQ 대비 RS",  "20일 수익률에서 QQQ 수익률을 뺀 값. 양수 = 나스닥보다 강함."),
+            "Float_M":   ("유통주식수 (M)", "시장에 유통 중인 주식 수(백만 주). 낮을수록 작은 공급 = 폭발력 ↑."),
+            "Short%":    ("공매도 비율",  "유통주 대비 공매도 비율. 20%+ = 숏 스퀴즈 잠재력."),
+            "PM_Gap":    ("프리마켓 갭",  "전일 종가 대비 프리마켓 가격 변화율. 갭업 = 당일 강한 수급 신호."),
+            "Catalyst":  ("카탈리스트 등급", "뉴스/이벤트 강도. A = 강한 펀더멘털 촉매 존재."),
+            "Next_Earn": ("다음 실적 발표", "실적 발표까지 남은 일수. 진입 전 확인 필수."),
+            "ATR":       ("ATR (평균 진폭)", "14일 Average True Range. 종목의 일평균 가격 움직임. 손절 계산 기준."),
+            "Entry":     ("진입가",        "권장 진입 가격. 보통 패턴 돌파 직후 레벨."),
+            "Stop":      ("손절가 (구조적)", "스윙 트렌드 붕괴 레벨. 이 아래면 아이디어 무효."),
+            "ATR_Stop":  ("ATR 손절가",    "현재가 - 1.5×ATR. 구조적 손절보다 보수적일 때 사용."),
+            "Target":    ("목표가",        "R:R 기준 목표가. 기본 2.5R 또는 주요 저항선."),
+            "R:R":       ("리스크 리워드 비율", "수익 가능 폭 ÷ 손절 폭. 1.8+ 필요, 2.5+ 권장."),
+            "Ready":     ("진입 준비",     "✅ YES = Score 75+, R:R 1.8+, 패턴 감지, 손절 7% 이내 모두 충족."),
+        }
+
+        tabs_m = st.tabs(["핵심 지표", "리스크 플랜", "스코어 분석"])
+
+        with tabs_m[0]:
+            core_keys = ["Score", "Grade", "Pattern", "RVOL", "RVOL_3D", "5D%",
+                         "RS_QQQ", "Float_M", "Short%", "PM_Gap", "Catalyst", "Next_Earn"]
+            cols = st.columns(2)
+            for idx, key in enumerate(core_keys):
+                if key not in METRIC_EXPLANATIONS:
+                    continue
+                val = row.get(key, "-")
+                title, desc = METRIC_EXPLANATIONS[key]
+                with cols[idx % 2]:
+                    st.markdown(
+                        f"**{title}**  `{val}`  \n"
+                        f"<span style='color:#aaa;font-size:.82rem'>{desc}</span>",
+                        unsafe_allow_html=True
+                    )
+                    st.markdown("")
+
+        with tabs_m[1]:
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Entry",    f"${row.get('Entry', '-')}")
+            r2.metric("Stop",     f"${row.get('Stop', '-')}")
+            r3.metric("ATR Stop", f"${row.get('ATR_Stop', '-')}")
+            r4.metric("Target",   f"${row.get('Target', '-')}")
+
+            rr = row.get("R:R", 0)
+            stop_pct = 0
+            try:
+                entry_v = float(row.get("Entry", 0))
+                stop_v  = float(row.get("Stop", 0))
+                if entry_v > 0:
+                    stop_pct = (entry_v - stop_v) / entry_v * 100
+            except Exception:
+                pass
+            c1, c2, c3 = st.columns(3)
+            rr_color = "normal" if float(rr or 0) >= 1.8 else "inverse"
+            c1.metric("R:R", f"{rr}", delta="OK" if float(rr or 0) >= 1.8 else "< 1.8 권장", delta_color=rr_color)
+            c2.metric("손절 폭", f"{stop_pct:.1f}%", delta="OK" if stop_pct <= 7 else "> 7% 과다",
+                      delta_color="normal" if stop_pct <= 7 else "inverse")
+            c3.metric("준비 여부", row.get("Ready", "-"))
+
+            for key in ["ATR", "Entry", "Stop", "ATR_Stop", "Target", "R:R", "Ready"]:
+                if key not in METRIC_EXPLANATIONS:
+                    continue
+                val = row.get(key, "-")
+                title, desc = METRIC_EXPLANATIONS[key]
+                st.markdown(
+                    f"**{title}**  `{val}`  \n"
+                    f"<span style='color:#aaa;font-size:.82rem'>{desc}</span>",
+                    unsafe_allow_html=True
+                )
+
+        with tabs_m[2]:
+            bk_labels = ["Market", "Ignition", "Quality", "Supply", "Chart", "Risk"]
+            bk_cols   = ["_Mkt", "_Ign", "_Qual", "_Sup", "_Chart", "_Risk"]
+            bk_vals   = [row.get(c, 0) for c in bk_cols]
+            bk_df = pd.DataFrame({"Module": bk_labels, "Score": bk_vals})
+            st.bar_chart(bk_df.set_index("Module"))
+            bk_desc = {
+                "Market":   "시장 레짐 점수 — QQQ/SPY 추세. 나쁜 시장엔 최고 셋업도 작동 안 함.",
+                "Ignition": "점화 신호 — 갭, 거래량 급증, 프리마켓 강도 등 진입 촉매.",
+                "Quality":  "RS, 모멘텀, 섹터 강도 등 종목 품질.",
+                "Supply":   "공급 구조 — Float 크기, 공매도 비율. 작은 공급 = 높은 폭발력.",
+                "Chart":    "패턴 완성도, 지지선/저항선 명확성.",
+                "Risk":     "R:R 비율, 손절 폭 적정성.",
+            }
+            for lbl, score, desc in zip(bk_labels, bk_vals, [bk_desc[l] for l in bk_labels]):
+                color = "#4caf50" if score >= 15 else ("#ff9800" if score >= 10 else "#f44336")
+                st.markdown(
+                    f'<span style="color:{color};font-weight:700">{lbl} {score:.0f}pt</span>'
+                    f' — <span style="color:#aaa;font-size:.85rem">{desc}</span>',
+                    unsafe_allow_html=True
+                )
+
+    # ── 뉴스 ─────────────────────────────────────────────
+    st.markdown("### 📰 최근 뉴스")
+    news = _get_news(ticker)
+    if not news:
+        st.info("뉴스를 불러올 수 없습니다. (FINNHUB_API_KEY 확인)")
+    else:
+        from modules.position_manager.exit_rules import NEGATIVE_KEYWORDS
+        for item in news[:10]:
+            headline = item.get("headline", "")
+            summary  = item.get("summary", "")
+            url      = item.get("url", "")
+            source   = item.get("source", "")
+            dt_ts    = item.get("datetime", 0)
+            try:
+                dt_str = datetime.fromtimestamp(dt_ts).strftime("%Y-%m-%d %H:%M") if dt_ts else ""
+            except Exception:
+                dt_str = ""
+            text_lower = (headline + summary).lower()
+            is_negative = any(kw in text_lower for kw in NEGATIVE_KEYWORDS)
+            badge = "🚨" if is_negative else "📄"
+            with st.expander(f"{badge} {headline}  —  {source}  {dt_str}"):
+                if summary:
+                    st.write(summary)
+                if url:
+                    st.markdown(f"[원문 보기]({url})")
+
+
 def run_screener_cached(tickers: list):
     from data.price_loader       import get_price_data, get_ticker_info, get_market_data, get_premarket_data
     from modules.indicators      import calculate_indicators
@@ -455,6 +666,18 @@ def render_screener_tab():
                         st.success(f"{row['Ticker']} added to positions.json")
                     else:
                         st.warning(f"{row['Ticker']} already in positions")
+
+    # ── Ticker Detail Report ─────────────────────────────
+    st.markdown("---")
+    st.subheader("Ticker Detail Report")
+    ticker_options = df["Ticker"].tolist() if not df.empty else []
+    selected_ticker = st.selectbox(
+        "종목 선택 (클릭하면 상세 리포트)",
+        ["— 선택하세요 —"] + ticker_options,
+        key="detail_ticker"
+    )
+    if selected_ticker != "— 선택하세요 —":
+        render_ticker_detail(selected_ticker, df)
 
     # Near-miss
     if nm is not None and not nm.empty:
