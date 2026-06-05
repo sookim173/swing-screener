@@ -284,81 +284,270 @@ def render_ticker_detail(ticker: str, df: pd.DataFrame):
     # ── 지표 설명 ─────────────────────────────────────────
     if row is not None:
         st.markdown("### 📋 지표 해설")
-
-        METRIC_EXPLANATIONS = {
-            "Score":     ("점수 (0~100)", "스크리너가 계산한 종합 점수. 75+ = 진입 검토, 85+ = 고품질 셋업."),
-            "Grade":     ("등급 (A~D)",   "A: 85+, B: 75~85, C: 65~75, D: 65 미만. 전반적인 셋업 품질."),
-            "Pattern":   ("차트 패턴",    "감지된 기술적 패턴. Bull Flag, Momentum Pullback, Cup Base 등."),
-            "RVOL":      ("상대거래량 (당일)", "오늘 거래량 ÷ 20일 평균. 1.5x+ = 강한 관심, 2x+ = 점화 신호."),
-            "RVOL_3D":   ("RVOL 3일 평균", "최근 3일 RVOL 평균. 추세적 거래량 증가 여부 확인."),
-            "5D%":       ("5일 수익률",   "최근 5거래일 가격 변화율. 단기 모멘텀 강도."),
-            "RS_QQQ":    ("QQQ 대비 RS",  "20일 수익률에서 QQQ 수익률을 뺀 값. 양수 = 나스닥보다 강함."),
-            "Float_M":   ("유통주식수 (M)", "시장에 유통 중인 주식 수(백만 주). 낮을수록 작은 공급 = 폭발력 ↑."),
-            "Short%":    ("공매도 비율",  "유통주 대비 공매도 비율. 20%+ = 숏 스퀴즈 잠재력."),
-            "PM_Gap":    ("프리마켓 갭",  "전일 종가 대비 프리마켓 가격 변화율. 갭업 = 당일 강한 수급 신호."),
-            "Catalyst":  ("카탈리스트 등급", "뉴스/이벤트 강도. A = 강한 펀더멘털 촉매 존재."),
-            "Next_Earn": ("다음 실적 발표", "실적 발표까지 남은 일수. 진입 전 확인 필수."),
-            "ATR":       ("ATR (평균 진폭)", "14일 Average True Range. 종목의 일평균 가격 움직임. 손절 계산 기준."),
-            "Entry":     ("진입가",        "권장 진입 가격. 보통 패턴 돌파 직후 레벨."),
-            "Stop":      ("손절가 (구조적)", "스윙 트렌드 붕괴 레벨. 이 아래면 아이디어 무효."),
-            "ATR_Stop":  ("ATR 손절가",    "현재가 - 1.5×ATR. 구조적 손절보다 보수적일 때 사용."),
-            "Target":    ("목표가",        "R:R 기준 목표가. 기본 2.5R 또는 주요 저항선."),
-            "R:R":       ("리스크 리워드 비율", "수익 가능 폭 ÷ 손절 폭. 1.8+ 필요, 2.5+ 권장."),
-            "Ready":     ("진입 준비",     "✅ YES = Score 75+, R:R 1.8+, 패턴 감지, 손절 7% 이내 모두 충족."),
-        }
-
         tabs_m = st.tabs(["핵심 지표", "리스크 플랜", "스코어 분석"])
 
+        # 공통 값 추출
+        try:
+            entry_v   = float(row.get("Entry") or 0)
+            stop_v    = float(row.get("Stop") or 0)
+            atr_stop_v = float(row.get("ATR_Stop") or 0)
+            target_v  = float(row.get("Target") or 0)
+            atr_v     = float(row.get("ATR") or 0)
+            price_v   = float(row.get("Price") or 0)
+            rr_v      = float(row.get("R:R") or 0)
+            risk_v    = entry_v - stop_v if entry_v and stop_v else 0
+            stop_pct  = risk_v / entry_v * 100 if entry_v else 0
+            reward_v  = target_v - entry_v if target_v and entry_v else 0
+            rvol      = float(row.get("RVOL") or 0)
+            rvol_3d   = float(row.get("RVOL_3D") or 0)
+            float_m   = float(row.get("Float_M") or 0)
+            score_v   = float(row.get("Score") or 0)
+        except Exception:
+            entry_v = stop_v = atr_stop_v = target_v = atr_v = price_v = 0
+            rr_v = risk_v = stop_pct = reward_v = rvol = rvol_3d = float_m = score_v = 0
+
+        def card(title: str, value: str, explanation: str, good: bool | None = None):
+            if good is True:
+                border = "#2e7d32"
+            elif good is False:
+                border = "#c62828"
+            else:
+                border = "#444"
+            st.markdown(
+                f"""<div style="border-left:3px solid {border};padding:8px 12px;margin-bottom:10px;background:#1e1e1e;border-radius:4px">
+                <span style="font-size:.8rem;color:#aaa;text-transform:uppercase;letter-spacing:.05em">{title}</span><br>
+                <span style="font-size:1.1rem;font-weight:700;color:#fff">{value}</span><br>
+                <span style="font-size:.82rem;color:#ccc">{explanation}</span>
+                </div>""",
+                unsafe_allow_html=True
+            )
+
         with tabs_m[0]:
-            core_keys = ["Score", "Grade", "Pattern", "RVOL", "RVOL_3D", "5D%",
-                         "RS_QQQ", "Float_M", "Short%", "PM_Gap", "Catalyst", "Next_Earn"]
             cols = st.columns(2)
-            for idx, key in enumerate(core_keys):
-                if key not in METRIC_EXPLANATIONS:
-                    continue
-                val = row.get(key, "-")
-                title, desc = METRIC_EXPLANATIONS[key]
-                with cols[idx % 2]:
-                    st.markdown(
-                        f"**{title}**  `{val}`  \n"
-                        f"<span style='color:#aaa;font-size:.82rem'>{desc}</span>",
-                        unsafe_allow_html=True
-                    )
-                    st.markdown("")
+
+            # Score
+            grade = row.get("Grade", "-")
+            above_75 = score_v >= 75
+            if score_v >= 85:
+                score_judge = f"85점 이상 → 고품질 셋업. 6개 모듈 대부분이 강한 신호."
+            elif score_v >= 75:
+                score_judge = f"75~85점 → 진입 검토 가능. 일부 모듈 약점 있으나 전반적으로 유효."
+            else:
+                score_judge = f"75점 미만 → 아직 진입 부적합. 약한 모듈 확인 필요."
+            with cols[0]:
+                card("종합 점수 (Score)", f"{score_v:.1f} / 100",
+                     f"시장·점화·품질·공급·차트·리스크 6개 모듈 합산. {score_judge}", good=above_75)
+
+            # Grade
+            grade_map = {"A": ("85점 이상", True), "B": ("75~85점", True),
+                         "C": ("65~75점", None), "D": ("65점 미만", False)}
+            g_desc, g_good = grade_map.get(str(grade)[0], ("-", None))
+            with cols[1]:
+                card("등급 (Grade)", str(grade),
+                     f"{g_desc} 구간. A/B = 진입 검토, C = 관망, D = 제외.", good=g_good)
+
+            # Pattern
+            pattern = row.get("Pattern", "-")
+            pattern_desc = {
+                "Bull Flag":           "강한 상승 후 짧은 깃발형 눌림. 이전 상승 에너지 재충전 중.",
+                "Momentum Pullback":   "상승 추세 중 단기 눌림목. EMA 지지 후 재상승 노리는 구조.",
+                "Cup Base":            "컵 형태 베이스 완성. 오른쪽 립 돌파 시 진입.",
+                "High Tight Flag":     "폭발적 상승 후 타이트한 통합. 매우 희귀하고 강력한 패턴.",
+                "VCP":                 "변동성 수축 패턴. 진폭이 줄어들며 에너지 압축 중.",
+                "Flat Base":           "평평한 횡보 베이스. 일정 박스권에서 공급 소진 확인.",
+                "No Pattern":          "명확한 패턴 미감지. 진입 시점 불분명.",
+            }
+            p_desc = pattern_desc.get(pattern, "감지된 기술적 패턴 구조.")
+            with cols[0]:
+                card("차트 패턴 (Pattern)", pattern, p_desc,
+                     good=(pattern != "No Pattern"))
+
+            # RVOL
+            if rvol >= 2.0:
+                rvol_judge = f"20일 평균의 {rvol:.1f}배 → 강한 점화 신호. 기관/세력 참여 가능성."
+            elif rvol >= 1.5:
+                rvol_judge = f"20일 평균의 {rvol:.1f}배 → 평균 이상 관심. 모멘텀 형성 중."
+            elif rvol >= 1.0:
+                rvol_judge = f"20일 평균의 {rvol:.1f}배 → 평균 수준. 돌파 확인엔 부족."
+            else:
+                rvol_judge = f"20일 평균의 {rvol:.1f}배 → 거래 부진. 관심 부족."
+            with cols[1]:
+                card("상대 거래량 (RVOL)", f"{rvol:.1f}x",
+                     f"오늘 거래량 ÷ 20일 평균 거래량. {rvol_judge}", good=(rvol >= 1.5))
+
+            # RVOL_3D
+            rvol_trend = "증가 추세" if rvol >= rvol_3d else "감소 추세"
+            with cols[0]:
+                card("RVOL 3일 평균", f"{rvol_3d:.1f}x" if rvol_3d else "-",
+                     f"최근 3일 RVOL 평균. 오늘 RVOL({rvol:.1f}x)과 비교하면 거래량 {rvol_trend}.",
+                     good=(rvol >= rvol_3d))
+
+            # 5D%
+            ret5 = row.get("5D%", "-")
+            try:
+                ret5_f = float(str(ret5).replace("%","").replace("+",""))
+                ret5_good = ret5_f > 3
+                ret5_note = f"{ret5_f:+.1f}% → " + ("강한 단기 모멘텀." if ret5_f > 5 else
+                             "보통 수준." if ret5_f > 0 else "단기 약세. 눌림 깊이 확인 필요.")
+            except Exception:
+                ret5_good, ret5_note = None, ""
+            with cols[1]:
+                card("5일 수익률 (5D%)", str(ret5),
+                     f"최근 5거래일 가격 변화. {ret5_note}", good=ret5_good)
+
+            # RS_QQQ
+            rs_qqq = row.get("RS_QQQ", "-")
+            try:
+                rs_f = float(str(rs_qqq).replace("%","").replace("+",""))
+                rs_good = rs_f > 0
+                rs_note = (f"나스닥보다 {rs_f:+.1f}%p 강함. " + ("섹터·시장을 리드하는 강세주." if rs_f > 5 else "소폭 아웃퍼폼.")) if rs_f > 0 else f"나스닥보다 {rs_f:.1f}%p 약함. 상대적 약세."
+            except Exception:
+                rs_good, rs_note = None, ""
+            with cols[0]:
+                card("QQQ 대비 RS", str(rs_qqq),
+                     f"20일 수익률 - QQQ 20일 수익률. {rs_note}", good=rs_good)
+
+            # Float_M
+            if float_m < 10:
+                float_note = f"{float_m:.1f}M주 유통. 소형 Float → 작은 매수세에도 주가 급등 가능."
+                float_good = True
+            elif float_m < 50:
+                float_note = f"{float_m:.1f}M주 유통. 중형 Float → 적절한 유동성."
+                float_good = True
+            else:
+                float_note = f"{float_m:.1f}M주 유통. 대형 Float → 큰 매수세 필요. 폭발력 제한."
+                float_good = False
+            with cols[1]:
+                card("유통주식수 (Float)", f"{float_m:.1f}M주",
+                     float_note, good=float_good)
+
+            # Short%
+            short_str = row.get("Short%", "-")
+            try:
+                short_f = float(str(short_str).replace("%",""))
+                if short_f >= 20:
+                    short_note = f"유통주 {short_f:.0f}%가 공매도. 상승 시 숏 커버 강제 → 추가 상승 가속 가능."
+                    short_good = True
+                elif short_f >= 10:
+                    short_note = f"유통주 {short_f:.0f}%가 공매도. 보통 수준."
+                    short_good = None
+                else:
+                    short_note = f"유통주 {short_f:.0f}%만 공매도. 숏 스퀴즈 기대 낮음."
+                    short_good = None
+            except Exception:
+                short_note, short_good = "", None
+            with cols[0]:
+                card("공매도 비율 (Short%)", str(short_str), short_note, good=short_good)
+
+            # PM_Gap
+            pm_gap = row.get("PM_Gap", "-")
+            try:
+                pm_f = float(str(pm_gap).replace("%","").replace("+",""))
+                if pm_f >= 3:
+                    pm_note = f"프리마켓에서 전일比 +{pm_f:.1f}% 갭업. 강한 수급 신호. 카탈리스트 확인 필요."
+                    pm_good = True
+                elif pm_f > 0:
+                    pm_note = f"프리마켓 +{pm_f:.1f}% 소폭 강세."
+                    pm_good = None
+                else:
+                    pm_note = f"프리마켓 {pm_f:.1f}%. 수급 약함."
+                    pm_good = False
+            except Exception:
+                pm_note, pm_good = "프리마켓 데이터 없음.", None
+            with cols[1]:
+                card("프리마켓 갭 (PM_Gap)", str(pm_gap), pm_note, good=pm_good)
+
+            # Catalyst
+            cat = row.get("Catalyst", "-")
+            cat_desc = {"A": "강한 펀더멘털 촉매 존재 (실적 서프라이즈·FDA 승인·계약 등). 상승 지속 가능성 높음.",
+                        "B": "보통 수준의 촉매. 뉴스는 있으나 임팩트 불확실.",
+                        "C": "약한 촉매 또는 섹터 테마 수혜 수준.",
+                        "D": "뚜렷한 촉매 없음. 순수 기술적 셋업으로만 접근."}
+            with cols[0]:
+                card("카탈리스트 등급", str(cat),
+                     cat_desc.get(str(cat)[0], "카탈리스트 강도 등급."),
+                     good=(str(cat)[0] in ("A", "B")))
+
+            # Next_Earn
+            ne = row.get("Next_Earn", "-")
+            try:
+                ne_days = int(str(ne).replace("d",""))
+                if ne_days <= 7:
+                    ne_note = f"실적 발표 {ne_days}일 후. 이번 주 진입 시 실적 리스크 노출. 사이즈 축소 또는 진입 대기 권장."
+                    ne_good = False
+                elif ne_days <= 21:
+                    ne_note = f"실적 발표 {ne_days}일 후. 진입 후 실적 전 익절 전략 검토."
+                    ne_good = None
+                else:
+                    ne_note = f"실적 발표 {ne_days}일 후. 스윙 기간 내 실적 리스크 낮음."
+                    ne_good = True
+            except Exception:
+                ne_note, ne_good = "실적 일정 미확인.", None
+            with cols[1]:
+                card("다음 실적 발표", str(ne), ne_note, good=ne_good)
 
         with tabs_m[1]:
             r1, r2, r3, r4 = st.columns(4)
-            r1.metric("Entry",    f"${row.get('Entry', '-')}")
-            r2.metric("Stop",     f"${row.get('Stop', '-')}")
-            r3.metric("ATR Stop", f"${row.get('ATR_Stop', '-')}")
-            r4.metric("Target",   f"${row.get('Target', '-')}")
+            r1.metric("진입가 (Entry)",  f"${entry_v:.2f}")
+            r2.metric("손절가 (Stop)",   f"${stop_v:.2f}")
+            r3.metric("ATR 손절",        f"${atr_stop_v:.2f}" if atr_stop_v else "-")
+            r4.metric("목표가 (Target)", f"${target_v:.2f}")
 
-            rr = row.get("R:R", 0)
-            stop_pct = 0
-            try:
-                entry_v = float(row.get("Entry", 0))
-                stop_v  = float(row.get("Stop", 0))
-                if entry_v > 0:
-                    stop_pct = (entry_v - stop_v) / entry_v * 100
-            except Exception:
-                pass
+            rr_color = "normal" if rr_v >= 1.8 else "inverse"
             c1, c2, c3 = st.columns(3)
-            rr_color = "normal" if float(rr or 0) >= 1.8 else "inverse"
-            c1.metric("R:R", f"{rr}", delta="OK" if float(rr or 0) >= 1.8 else "< 1.8 권장", delta_color=rr_color)
-            c2.metric("손절 폭", f"{stop_pct:.1f}%", delta="OK" if stop_pct <= 7 else "> 7% 과다",
+            c1.metric("R:R", f"{rr_v:.2f}", delta="기준 충족" if rr_v >= 1.8 else "1.8 미달",
+                      delta_color=rr_color)
+            c2.metric("손절 폭", f"{stop_pct:.1f}%", delta="적정" if stop_pct <= 7 else "7% 초과",
                       delta_color="normal" if stop_pct <= 7 else "inverse")
-            c3.metric("준비 여부", row.get("Ready", "-"))
+            c3.metric("진입 준비", row.get("Ready", "-"))
 
-            for key in ["ATR", "Entry", "Stop", "ATR_Stop", "Target", "R:R", "Ready"]:
-                if key not in METRIC_EXPLANATIONS:
-                    continue
-                val = row.get(key, "-")
-                title, desc = METRIC_EXPLANATIONS[key]
-                st.markdown(
-                    f"**{title}**  `{val}`  \n"
-                    f"<span style='color:#aaa;font-size:.82rem'>{desc}</span>",
-                    unsafe_allow_html=True
-                )
+            st.markdown("---")
+            cols2 = st.columns(2)
+
+            # Entry 설명
+            entry_from_price = (entry_v - price_v) / price_v * 100 if price_v else 0
+            with cols2[0]:
+                card("진입가 $" + f"{entry_v:.2f}", "",
+                     f"현재가 ${price_v:.2f}에서 {entry_from_price:+.1f}% 위. "
+                     f"패턴 돌파 레벨로 설정됨. 이 가격을 상향 돌파해야 매수 트리거 발동.")
+
+            # Stop 설명
+            with cols2[1]:
+                card("손절가 $" + f"{stop_v:.2f}", "",
+                     f"진입가 ${entry_v:.2f}에서 ${risk_v:.2f}({stop_pct:.1f}%) 아래. "
+                     f"최근 스윙 로우 또는 패턴 저점 기준. 이 아래 종가 발생 시 스윙 구조 붕괴 → 즉시 손절.",
+                     good=(stop_pct <= 7))
+
+            # ATR Stop 설명
+            with cols2[0]:
+                atr_stop_pct = (entry_v - atr_stop_v) / entry_v * 100 if entry_v and atr_stop_v else 0
+                card("ATR 손절 $" + f"{atr_stop_v:.2f}", "",
+                     f"진입가 - ATR({atr_v:.2f}) × 1.5 = ${atr_stop_v:.2f}. "
+                     f"구조적 손절({stop_v:.2f})보다 {'더 타이트' if atr_stop_v > stop_v else '더 여유 있는'} 레벨. "
+                     f"둘 중 유리한 쪽 선택.")
+
+            # Target 설명
+            with cols2[1]:
+                card("목표가 $" + f"{target_v:.2f}", "",
+                     f"진입가 ${entry_v:.2f} + 리스크({risk_v:.2f}) × {rr_v:.1f} = ${target_v:.2f}. "
+                     f"상승 여력 +{reward_v/entry_v*100:.1f}% ({reward_v:.2f}달러). "
+                     f"주요 저항선 또는 R:R 목표 중 보수적 값 사용.",
+                     good=True)
+
+            # ATR 설명
+            with cols2[0]:
+                card("ATR(14) " + f"${atr_v:.2f}", "",
+                     f"14일 평균 일변동 폭 ${atr_v:.2f}. 하루에 이 정도 움직이는 종목. "
+                     f"손절 계산에 사용 (Stop = Entry - 1.5×ATR). "
+                     f"ATR이 클수록 = 변동성 높음 = 포지션 사이즈 줄여야.")
+
+            # R:R 설명
+            with cols2[1]:
+                card("R:R " + f"{rr_v:.2f}", "",
+                     f"수익 가능 폭(${reward_v:.2f}) ÷ 손절 폭(${risk_v:.2f}) = {rr_v:.2f}. "
+                     f"1달러 잃는 리스크로 {rr_v:.2f}달러 벌 수 있는 구조. "
+                     f"{'✅ 1.8 이상으로 진입 기준 충족.' if rr_v >= 1.8 else '⚠ 1.8 미달. 진입 기준 미충족.'}",
+                     good=(rr_v >= 1.8))
 
         with tabs_m[2]:
             bk_labels = ["Market", "Ignition", "Quality", "Supply", "Chart", "Risk"]
@@ -366,21 +555,33 @@ def render_ticker_detail(ticker: str, df: pd.DataFrame):
             bk_vals   = [row.get(c, 0) for c in bk_cols]
             bk_df = pd.DataFrame({"Module": bk_labels, "Score": bk_vals})
             st.bar_chart(bk_df.set_index("Module"))
-            bk_desc = {
-                "Market":   "시장 레짐 점수 — QQQ/SPY 추세. 나쁜 시장엔 최고 셋업도 작동 안 함.",
-                "Ignition": "점화 신호 — 갭, 거래량 급증, 프리마켓 강도 등 진입 촉매.",
-                "Quality":  "RS, 모멘텀, 섹터 강도 등 종목 품질.",
-                "Supply":   "공급 구조 — Float 크기, 공매도 비율. 작은 공급 = 높은 폭발력.",
-                "Chart":    "패턴 완성도, 지지선/저항선 명확성.",
-                "Risk":     "R:R 비율, 손절 폭 적정성.",
+
+            mkt_score = row.get("_market_score", 0)
+            bk_dynamic = {
+                "Market":   f"{bk_vals[0]:.0f}pt — 시장 레짐 점수 {mkt_score}/100 반영. "
+                            + ("시장 강세 구간. 셋업 유효." if bk_vals[0] >= 15 else
+                               "시장 중립. 셋업 품질이 더 중요." if bk_vals[0] >= 10 else
+                               "시장 약세. 좋은 셋업도 실패 확률 높음."),
+                "Ignition": f"{bk_vals[1]:.0f}pt — 점화 신호 강도. RVOL {rvol:.1f}x, PM갭 {row.get('PM_Gap','-')}. "
+                            + ("강한 점화 — 기관 참여 신호." if bk_vals[1] >= 18 else
+                               "보통 수준." if bk_vals[1] >= 12 else "점화 약함. 매수세 부족."),
+                "Quality":  f"{bk_vals[2]:.0f}pt — RS vs QQQ {row.get('RS_QQQ','-')}, 5D {row.get('5D%','-')}. "
+                            + ("강한 모멘텀 종목." if bk_vals[2] >= 14 else "보통." if bk_vals[2] >= 9 else "모멘텀 약함."),
+                "Supply":   f"{bk_vals[3]:.0f}pt — Float {float_m:.0f}M주, Short {row.get('Short%','-')}. "
+                            + ("공급 타이트 → 폭발력 높음." if bk_vals[3] >= 12 else "보통." if bk_vals[3] >= 8 else "공급 과다."),
+                "Chart":    f"{bk_vals[4]:.0f}pt — 패턴: {row.get('Pattern','-')}. "
+                            + ("패턴 완성도 높음." if bk_vals[4] >= 15 else "패턴 불완전." if bk_vals[4] >= 8 else "패턴 미감지."),
+                "Risk":     f"{bk_vals[5]:.0f}pt — R:R {rr_v:.2f}, 손절 {stop_pct:.1f}%. "
+                            + ("리스크 관리 우수." if bk_vals[5] >= 12 else "보통." if bk_vals[5] >= 8 else "리스크 불량."),
             }
-            for lbl, score, desc in zip(bk_labels, bk_vals, [bk_desc[l] for l in bk_labels]):
+            for lbl, score in zip(bk_labels, bk_vals):
                 color = "#4caf50" if score >= 15 else ("#ff9800" if score >= 10 else "#f44336")
                 st.markdown(
-                    f'<span style="color:{color};font-weight:700">{lbl} {score:.0f}pt</span>'
-                    f' — <span style="color:#aaa;font-size:.85rem">{desc}</span>',
+                    f'<span style="color:{color};font-weight:700;font-size:.95rem">{lbl}</span>'
+                    f' — <span style="color:#ccc;font-size:.85rem">{bk_dynamic[lbl]}</span>',
                     unsafe_allow_html=True
                 )
+                st.markdown("")
 
     # ── 뉴스 ─────────────────────────────────────────────
     st.markdown("### 📰 최근 뉴스")
