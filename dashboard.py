@@ -1641,11 +1641,149 @@ def _status_badge(status: str) -> str:
     return f"{icon} {status}"
 
 
+def _run_entry_analysis(items: list) -> dict:
+    """Watchlist 전체 종목에 대해 Entry Validation 실행. {ticker: result} 반환."""
+    from modules.position_manager.intraday_data import get_intraday_df
+    from modules.entry_validator import validate_entry
+    from data.price_loader import get_ticker_info
+
+    results = {}
+    prog = st.progress(0, text="Entry Analysis 실행 중...")
+    total = len(items)
+
+    for i, item in enumerate(items):
+        ticker = item["ticker"]
+        prog.progress((i + 1) / total, text=f"Analyzing {ticker}...")
+
+        df_5m = get_intraday_df(ticker, "5m")
+        if df_5m is None or df_5m.empty:
+            results[ticker] = {
+                "entry_score": 0, "engine_status": "WATCH",
+                "reason": "Intraday 데이터 없음 (장 외 시간 또는 API 오류)",
+                "failed_reasons": [], "signals": {}, "score_breakdown": {},
+            }
+            continue
+
+        info        = get_ticker_info(ticker)
+        avg_vol     = info.get("avg_volume", 0) or 1
+        opp_score   = item.get("opp_score", 0)
+
+        results[ticker] = validate_entry(df_5m, avg_vol, opp_score)
+
+    prog.empty()
+    return results
+
+
+def _entry_status_color(status: str) -> str:
+    return {
+        "BUYABLE":    "#1b5e20",
+        "SETTING_UP": "#f57f17",
+        "WEAKENING":  "#e65100",
+        "FAILED":     "#b71c1c",
+        "WATCH":      "#1565c0",
+    }.get(status, "#444")
+
+
+def _render_entry_panel(ticker: str, result: dict, opp_score: float):
+    """Entry Analysis 결과 패널 렌더링."""
+    import plotly.graph_objects as go
+
+    es      = result.get("entry_score", 0)
+    status  = result.get("engine_status", "WATCH")
+    reason  = result.get("reason", "-")
+    sigs    = result.get("signals", {})
+    bk      = result.get("score_breakdown", {})
+    color   = _entry_status_color(status)
+
+    # 상태 배너
+    st.markdown(
+        f'<div style="background:{color}33;border-left:4px solid {color};'
+        f'padding:8px 14px;border-radius:4px;margin-bottom:10px">'
+        f'<span style="color:#fff;font-weight:700;font-size:1rem">'
+        f'Engine: {status}  |  Entry Score {es:.1f}/100</span><br>'
+        f'<span style="color:#ddd;font-size:.85rem">{reason}</span></div>',
+        unsafe_allow_html=True
+    )
+
+    if not sigs:
+        return
+
+    # 핵심 신호 메트릭
+    e1, e2, e3, e4, e5 = st.columns(5)
+    price      = sigs.get("price", 0)
+    vwap       = sigs.get("vwap", 0)
+    vwap_dist  = sigs.get("vwap_distance_pct", 0)
+    vol_pace   = sigs.get("volume_pace", 0)
+    day_high   = sigs.get("day_high", 0)
+    day_low    = sigs.get("day_low", 0)
+
+    e1.metric("현재가",       f"${price:.2f}")
+    e2.metric("VWAP",         f"${vwap:.2f}",
+              delta=f"{vwap_dist:+.1f}%",
+              delta_color="normal" if vwap_dist >= 0 else "inverse")
+    e3.metric("Volume Pace",  f"{vol_pace:.1f}x",
+              delta="강함" if vol_pace >= 3 else ("보통" if vol_pace >= 1.5 else "약함"),
+              delta_color="normal" if vol_pace >= 2 else "inverse")
+    e4.metric("Day High",     f"${day_high:.2f}",
+              delta=f"고점比 {sigs.get('from_high_pct',0):.1f}%",
+              delta_color="inverse" if sigs.get("from_high_pct", 0) < -10 else "off")
+    e5.metric("종가 위치",    f"{sigs.get('close_position',0)*100:.0f}%",
+              delta="상단" if sigs.get("close_position",0) >= 0.6 else "하단",
+              delta_color="normal" if sigs.get("close_position",0) >= 0.6 else "inverse")
+
+    # ORB + 구조 신호
+    o1, o2, o3, o4, o5 = st.columns(5)
+    orb15h = sigs.get("orb_15_high", 0)
+    orb15l = sigs.get("orb_15_low",  0)
+    o1.metric("ORB 15분 High", f"${orb15h:.2f}",
+              delta="돌파" if sigs.get("above_orb_15_high") else "미달",
+              delta_color="normal" if sigs.get("above_orb_15_high") else "off")
+    o2.metric("ORB 15분 Low",  f"${orb15l:.2f}",
+              delta="유지" if not sigs.get("orb_15_low_broken") else "이탈",
+              delta_color="normal" if not sigs.get("orb_15_low_broken") else "inverse")
+    o3.metric("VWAP 위",
+              f"{sigs.get('bars_above_vwap',0)}봉 / {sigs.get('bars_below_vwap',0)}봉",
+              delta="VWAP Reclaim" if sigs.get("vwap_reclaim") else "",
+              delta_color="normal")
+    o4.metric("Higher Low",
+              f"{sigs.get('higher_low_count',0)}회",
+              delta_color="off")
+    o5.metric("Lower High",
+              f"{sigs.get('lower_high_count',0)}회",
+              delta="Fakeout" if sigs.get("fakeout") else "",
+              delta_color="inverse" if sigs.get("fakeout") else "off")
+
+    # 점수 구성 차트
+    if bk:
+        score_labels = ["VWAP(25)", "ORB(25)", "Volume(20)", "Structure(20)", "Position(10)"]
+        score_vals   = [bk.get("vwap",0), bk.get("orb",0), bk.get("volume",0),
+                        bk.get("structure",0), bk.get("position",0)]
+        max_vals     = [25, 25, 20, 20, 10]
+        bar_colors   = ["#4caf50" if v >= m * 0.7 else ("#ff9800" if v >= m * 0.4 else "#f44336")
+                        for v, m in zip(score_vals, max_vals)]
+        fig = go.Figure(go.Bar(
+            x=score_labels, y=score_vals,
+            marker_color=bar_colors, text=score_vals, textposition="auto",
+        ))
+        fig.update_layout(
+            height=200, template="plotly_dark",
+            margin=dict(l=0, r=0, t=20, b=20),
+            yaxis=dict(range=[0, 25]),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # 실패 이유
+    fail_reasons = result.get("failed_reasons", [])
+    if fail_reasons:
+        st.error("실패 조건: " + " | ".join(fail_reasons))
+
+
 def render_watchlist_tab():
-    st.subheader("Watchlist — Phase 2 대기 종목")
+    st.subheader("Watchlist — Phase 2 진입 검토")
     st.caption(
-        "Screener에서 선택한 후보들을 추적합니다. "
-        "Status를 업데이트하고 진입 준비가 되면 Monitor로 승격하세요."
+        "Screener에서 선택한 후보들의 진입 타이밍을 분석합니다. "
+        "**Run Entry Analysis** 로 Intraday 신호를 확인하고 Status를 관리하세요."
     )
 
     items = load_watchlist()
@@ -1653,40 +1791,83 @@ def render_watchlist_tab():
         st.info("Watchlist가 비어 있습니다. Screener 탭에서 종목을 추가하세요.")
         return
 
-    # ── 요약 메트릭 ──────────────────────────────────────
-    total      = len(items)
-    buyable    = sum(1 for it in items if it["status"] == "BUYABLE")
-    setting_up = sum(1 for it in items if it["status"] == "SETTING_UP")
-    watch      = sum(1 for it in items if it["status"] == "WATCH")
+    # ── Entry Analysis 실행 버튼 ─────────────────────────
+    col_run, col_info = st.columns([1, 3])
+    with col_run:
+        run_entry = st.button("▶ Run Entry Analysis", type="primary",
+                              use_container_width=True,
+                              help="5분봉 데이터로 VWAP/ORB/Volume Pace/구조 분석 (장중 실행 권장)")
+    with col_info:
+        st.caption(
+            "yfinance 5분봉 기준 (15분 지연). "
+            "VWAP · ORB 15분 · Volume Pace · Higher Low / Lower High 구조 분석."
+        )
 
-    m1, m2, m3, m4 = st.columns(4)
+    if run_entry:
+        with st.spinner("Intraday 데이터 분석 중..."):
+            entry_results = _run_entry_analysis(items)
+        st.session_state["entry_results"] = entry_results
+        st.success(f"{len(entry_results)}개 종목 분석 완료")
+
+    entry_results = st.session_state.get("entry_results", {})
+
+    # ── 요약 메트릭 ──────────────────────────────────────
+    # 분석 결과 반영 시 engine_status, 아니면 저장된 status 사용
+    def effective_status(item):
+        er = entry_results.get(item["ticker"])
+        return er["engine_status"] if er else item.get("status", "WATCH")
+
+    total      = len(items)
+    buyable    = sum(1 for it in items if effective_status(it) == "BUYABLE")
+    setting_up = sum(1 for it in items if effective_status(it) == "SETTING_UP")
+    weakening  = sum(1 for it in items if effective_status(it) == "WEAKENING")
+    watch      = sum(1 for it in items if effective_status(it) == "WATCH")
+
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("전체",        total)
-    m2.metric("BUYABLE",     buyable,    delta="진입 가능" if buyable else None)
+    m2.metric("BUYABLE",     buyable,    delta="진입 가능" if buyable else None,
+              delta_color="normal" if buyable else "off")
     m3.metric("SETTING UP",  setting_up)
-    m4.metric("WATCH",       watch)
+    m4.metric("WEAKENING",   weakening,  delta_color="inverse" if weakening else "off")
+    m5.metric("WATCH",       watch)
 
     st.markdown("---")
 
     # ── 종목 카드 ─────────────────────────────────────────
-    updated = False
+    updated        = False
     remove_tickers = []
 
     for idx, item in enumerate(items):
         ticker  = item["ticker"]
         status  = item.get("status", "WATCH")
-        dot     = _STATUS_COLOR.get(status, ("#888", "⚪"))[1]
+        er      = entry_results.get(ticker)
+        es      = er["entry_score"] if er else None
+        eng_st  = er["engine_status"] if er else None
         opp_sc  = item.get("opp_score", 0)
         pattern = item.get("pattern", "-")
         added   = item.get("added_date", "")
 
+        # 헤더에 두 점수 모두 표시
+        dot     = _STATUS_COLOR.get(status, ("#888", "⚪"))[1]
+        score_str = f"Opp {opp_sc:.1f}"
+        if es is not None:
+            score_str += f"  ·  Entry {es:.1f}"
+        if eng_st and eng_st != status:
+            score_str += f"  →  Engine: **{eng_st}**"
+
         with st.expander(
-            f"{dot} **{ticker}**  |  Opp {opp_sc:.1f}  |  {pattern}  |  {status}  |  {added}",
-            expanded=(status in ("BUYABLE", "SETTING_UP"))
+            f"{dot} **{ticker}**  |  {score_str}  |  {pattern}  |  {status}  |  {added}",
+            expanded=(status in ("BUYABLE", "SETTING_UP") or
+                      (eng_st in ("BUYABLE", "SETTING_UP")))
         ):
+            # ── Entry Analysis 결과 (분석 실행 후) ────────
+            if er:
+                _render_entry_panel(ticker, er, opp_score=opp_sc)
+                st.markdown("---")
+
             col_l, col_r = st.columns([2, 1])
 
             with col_l:
-                # 핵심 지표 행
                 c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Price",   f"${item.get('price', 0):.2f}")
                 c2.metric("Entry",   f"${item.get('entry', 0):.2f}" if item.get('entry') else "-")
@@ -1699,7 +1880,6 @@ def render_watchlist_tab():
                 d2.metric("RVOL",      f"{item.get('rvol', 0):.1f}x")
                 d3.metric("Float",     f"{item.get('float_m', 0):.1f}M")
 
-                # 메모
                 new_note = st.text_area(
                     "메모",
                     value=item.get("note", ""),
@@ -1712,9 +1892,17 @@ def render_watchlist_tab():
                     updated = True
 
             with col_r:
-                # Status 변경
+                # Engine 추천 Status 적용 버튼
+                if eng_st and eng_st != status:
+                    st.caption(f"Engine 추천: **{eng_st}**")
+                    if st.button(f"→ {eng_st} 적용", key=f"apply_eng_{ticker}_{idx}",
+                                 use_container_width=True):
+                        item["status"] = eng_st
+                        updated = True
+                        st.rerun()
+
                 new_status = st.selectbox(
-                    "Status",
+                    "수동 Status",
                     options=_STATUS_OPTS,
                     index=_STATUS_OPTS.index(status) if status in _STATUS_OPTS else 0,
                     key=f"status_{ticker}_{idx}",
@@ -1725,7 +1913,6 @@ def render_watchlist_tab():
 
                 st.markdown("")
 
-                # Monitor로 승격
                 if st.button("📌 Monitor로 승격", key=f"promote_{ticker}_{idx}",
                              use_container_width=True):
                     positions = load_positions()
@@ -1754,12 +1941,10 @@ def render_watchlist_tab():
                     else:
                         st.info(f"{ticker}은 이미 Monitor에 있습니다.")
 
-                # 제거
                 if st.button("🗑 제거", key=f"remove_{ticker}_{idx}",
                              use_container_width=True):
                     remove_tickers.append(ticker)
 
-    # 변경사항 저장
     if remove_tickers:
         items = [it for it in items if it["ticker"] not in remove_tickers]
         updated = True
@@ -1768,22 +1953,27 @@ def render_watchlist_tab():
         save_watchlist(items)
         st.rerun()
 
-    # ── 테이블 요약 뷰 ────────────────────────────────────
+    # ── 전체 목록 테이블 ──────────────────────────────────
     st.markdown("---")
     st.markdown("#### 전체 목록")
     summary_rows = []
     for it in items:
+        er    = entry_results.get(it["ticker"])
+        es    = er["entry_score"] if er else None
+        eng   = er["engine_status"] if er else "-"
         summary_rows.append({
-            "Status":    _status_badge(it.get("status", "WATCH")),
-            "Ticker":    it["ticker"],
-            "Opp Score": it.get("opp_score", 0),
-            "Pattern":   it.get("pattern", "-"),
-            "Catalyst":  it.get("catalyst", "-"),
-            "Price":     it.get("price", 0),
-            "Entry":     it.get("entry", 0),
-            "R:R":       it.get("rr", 0),
-            "Added":     it.get("added_date", ""),
-            "Note":      it.get("note", "")[:40],
+            "Status":       _status_badge(it.get("status", "WATCH")),
+            "Ticker":       it["ticker"],
+            "Opp Score":    it.get("opp_score", 0),
+            "Entry Score":  es if es is not None else "-",
+            "Engine":       eng,
+            "Pattern":      it.get("pattern", "-"),
+            "Catalyst":     it.get("catalyst", "-"),
+            "Price":        it.get("price", 0),
+            "Entry":        it.get("entry", 0),
+            "R:R":          it.get("rr", 0),
+            "Added":        it.get("added_date", ""),
+            "Note":         it.get("note", "")[:40],
         })
     if summary_rows:
         st.dataframe(
@@ -1793,6 +1983,8 @@ def render_watchlist_tab():
             column_config={
                 "Opp Score": st.column_config.ProgressColumn(
                     "Opp Score", min_value=0, max_value=100, format="%.1f"),
+                "Entry Score": st.column_config.ProgressColumn(
+                    "Entry Score", min_value=0, max_value=100, format="%.1f"),
             }
         )
 
