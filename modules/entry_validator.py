@@ -223,48 +223,66 @@ def validate_entry(
         "close_position":     close_position,
     }
 
+    from datetime import datetime as _dt
+    transition_entry = {
+        "time":         _dt.now().strftime("%m/%d %H:%M"),
+        "status":       engine_status,
+        "entry_score":  entry_score,
+        "reason":       reason,
+    }
+
     return {
-        "entry_score":     entry_score,
-        "engine_status":   engine_status,
-        "reason":          reason,
-        "failed_reasons":  failed_reasons,
-        "signals":         signals,
-        "score_breakdown": score_breakdown,
+        "entry_score":      entry_score,
+        "engine_status":    engine_status,
+        "reason":           reason,
+        "failed_reasons":   failed_reasons,
+        "signals":          signals,
+        "score_breakdown":  score_breakdown,
+        "transition_entry": transition_entry,
     }
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────
 
 def _count_hl_lh(high: pd.Series, low: pd.Series) -> tuple[int, int]:
-    """전체 봉 시퀀스에서 Higher Low / Lower High 누적 카운트."""
-    highs = high.values
+    """
+    Pivot 기반 Higher Low / Lower High 카운트.
+    좌우 2봉 기준 피벗 저점/고점을 찾고 연속 비교.
+
+    5분봉 하루치(~78봉) 기준 pivot_window=2가 적절:
+    window=3이면 하루에 피벗을 거의 못 찾는 문제 발생.
+    """
     lows  = low.values
-    hl_count = 0
-    lh_count = 0
-    pivot_window = 3  # 좌우 N봉 기준 피벗
+    highs = high.values
+    W = 2  # 좌우 N봉
 
-    for i in range(pivot_window, len(lows) - pivot_window):
-        local_low = lows[i]
-        if all(local_low < lows[i - j] for j in range(1, pivot_window + 1)) and \
-           all(local_low < lows[i + j] for j in range(1, pivot_window + 1)):
-            # 피벗 저점 확인 — 직전 피벗 저점보다 높으면 Higher Low
-            for k in range(i - 1, -1, -1):
-                prev = lows[k]
-                if prev != local_low:
-                    if local_low > prev:
-                        hl_count += 1
-                    break
+    # 피벗 저점 리스트
+    pivot_lows = [
+        lows[i]
+        for i in range(W, len(lows) - W)
+        if all(lows[i] <= lows[i - j] for j in range(1, W + 1)) and
+           all(lows[i] <= lows[i + j] for j in range(1, W + 1))
+    ]
 
-    for i in range(pivot_window, len(highs) - pivot_window):
-        local_high = highs[i]
-        if all(local_high > highs[i - j] for j in range(1, pivot_window + 1)) and \
-           all(local_high > highs[i + j] for j in range(1, pivot_window + 1)):
-            for k in range(i - 1, -1, -1):
-                prev = highs[k]
-                if prev != local_high:
-                    if local_high < prev:
-                        lh_count += 1
-                    break
+    # 피벗 고점 리스트
+    pivot_highs = [
+        highs[i]
+        for i in range(W, len(highs) - W)
+        if all(highs[i] >= highs[i - j] for j in range(1, W + 1)) and
+           all(highs[i] >= highs[i + j] for j in range(1, W + 1))
+    ]
+
+    # 연속 피벗 저점 비교 → Higher Low
+    hl_count = sum(
+        1 for i in range(1, len(pivot_lows))
+        if pivot_lows[i] > pivot_lows[i - 1]
+    )
+
+    # 연속 피벗 고점 비교 → Lower High
+    lh_count = sum(
+        1 for i in range(1, len(pivot_highs))
+        if pivot_highs[i] < pivot_highs[i - 1]
+    )
 
     return hl_count, lh_count
 

@@ -1641,15 +1641,42 @@ def _status_badge(status: str) -> str:
     return f"{icon} {status}"
 
 
+def _get_news_age(ticker: str) -> dict:
+    """가장 최근 뉴스의 경과 시간(시간 단위) + freshness 등급 반환."""
+    news = _get_news(ticker)
+    if not news:
+        return {"age_h": None, "freshness": "-", "headline": ""}
+    # datetime 기준 최신 뉴스 선택
+    latest = max(news, key=lambda n: n.get("datetime", 0))
+    dt_ts  = latest.get("datetime", 0)
+    if not dt_ts:
+        return {"age_h": None, "freshness": "-", "headline": ""}
+    age_h = (datetime.now().timestamp() - dt_ts) / 3600
+    if   age_h <= 4:   freshness = "★★★★★"
+    elif age_h <= 12:  freshness = "★★★★☆"
+    elif age_h <= 24:  freshness = "★★★☆☆"
+    elif age_h <= 48:  freshness = "★★☆☆☆"
+    else:              freshness = "★☆☆☆☆"
+    return {
+        "age_h":    round(age_h, 1),
+        "freshness": freshness,
+        "headline":  latest.get("headline", "")[:80],
+    }
+
+
 def _run_entry_analysis(items: list) -> dict:
-    """Watchlist 전체 종목에 대해 Entry Validation 실행. {ticker: result} 반환."""
+    """
+    Watchlist 전체 종목 Entry Validation 실행.
+    transition_entry를 item["transitions"]에 기록하고 watchlist 저장.
+    {ticker: result} 반환.
+    """
     from modules.position_manager.intraday_data import get_intraday_df
     from modules.entry_validator import validate_entry
     from data.price_loader import get_ticker_info
 
     results = {}
-    prog = st.progress(0, text="Entry Analysis 실행 중...")
-    total = len(items)
+    prog    = st.progress(0, text="Entry Analysis 실행 중...")
+    total   = len(items)
 
     for i, item in enumerate(items):
         ticker = item["ticker"]
@@ -1657,20 +1684,32 @@ def _run_entry_analysis(items: list) -> dict:
 
         df_5m = get_intraday_df(ticker, "5m")
         if df_5m is None or df_5m.empty:
-            results[ticker] = {
+            result = {
                 "entry_score": 0, "engine_status": "WATCH",
                 "reason": "Intraday 데이터 없음 (장 외 시간 또는 API 오류)",
                 "failed_reasons": [], "signals": {}, "score_breakdown": {},
+                "transition_entry": None,
+                "news_age": {"age_h": None, "freshness": "-", "headline": ""},
             }
-            continue
+        else:
+            info      = get_ticker_info(ticker)
+            avg_vol   = info.get("avg_volume", 0) or 1
+            result    = validate_entry(df_5m, avg_vol, item.get("opp_score", 0))
+            result["news_age"] = _get_news_age(ticker)
 
-        info        = get_ticker_info(ticker)
-        avg_vol     = info.get("avg_volume", 0) or 1
-        opp_score   = item.get("opp_score", 0)
+        # Transition 기록: 직전 마지막 기록과 status가 다르거나 처음이면 추가
+        te = result.get("transition_entry")
+        if te:
+            transitions = item.setdefault("transitions", [])
+            if not transitions or transitions[-1]["status"] != te["status"]:
+                transitions.append(te)
+            # 최대 20개 유지
+            item["transitions"] = transitions[-20:]
 
-        results[ticker] = validate_entry(df_5m, avg_vol, opp_score)
+        results[ticker] = result
 
     prog.empty()
+    save_watchlist(items)   # transition 기록 영구 저장
     return results
 
 
@@ -1684,7 +1723,17 @@ def _entry_status_color(status: str) -> str:
     }.get(status, "#444")
 
 
-def _render_entry_panel(ticker: str, result: dict, opp_score: float):
+def _close_vs_high_grade(close_pos: float) -> tuple[str, str]:
+    """종가 위치 → 등급 레이블 + 색상."""
+    if   close_pos >= 0.80: return "VERY STRONG 🟢", "#1b5e20"
+    elif close_pos >= 0.60: return "STRONG 🟢",       "#2e7d32"
+    elif close_pos >= 0.40: return "NEUTRAL 🟡",      "#f57f17"
+    elif close_pos >= 0.20: return "WEAK 🔴",          "#c62828"
+    else:                   return "VERY WEAK 🔴",     "#b71c1c"
+
+
+def _render_entry_panel(ticker: str, result: dict, opp_score: float,
+                        transitions: list | None = None):
     """Entry Analysis 결과 패널 렌더링."""
     import plotly.graph_objects as go
 
@@ -1694,8 +1743,9 @@ def _render_entry_panel(ticker: str, result: dict, opp_score: float):
     sigs    = result.get("signals", {})
     bk      = result.get("score_breakdown", {})
     color   = _entry_status_color(status)
+    na      = result.get("news_age", {})
 
-    # 상태 배너
+    # ── 상태 배너 ──────────────────────────────────────────
     st.markdown(
         f'<div style="background:{color}33;border-left:4px solid {color};'
         f'padding:8px 14px;border-radius:4px;margin-bottom:10px">'
@@ -1708,41 +1758,70 @@ def _render_entry_panel(ticker: str, result: dict, opp_score: float):
     if not sigs:
         return
 
-    # 핵심 신호 메트릭
-    e1, e2, e3, e4, e5 = st.columns(5)
-    price      = sigs.get("price", 0)
-    vwap       = sigs.get("vwap", 0)
-    vwap_dist  = sigs.get("vwap_distance_pct", 0)
-    vol_pace   = sigs.get("volume_pace", 0)
-    day_high   = sigs.get("day_high", 0)
-    day_low    = sigs.get("day_low", 0)
+    # ── 핵심 신호 메트릭 Row 1 ────────────────────────────
+    price     = sigs.get("price", 0)
+    vwap      = sigs.get("vwap", 0)
+    vwap_dist = sigs.get("vwap_distance_pct", 0)
+    vol_pace  = sigs.get("volume_pace", 0)
+    day_high  = sigs.get("day_high", 0)
+    cp        = sigs.get("close_position", 0)
+    cp_label, cp_color = _close_vs_high_grade(cp)
+    age_h     = na.get("age_h")
+    freshness = na.get("freshness", "-")
 
-    e1.metric("현재가",       f"${price:.2f}")
-    e2.metric("VWAP",         f"${vwap:.2f}",
+    e1, e2, e3, e4, e5, e6 = st.columns(6)
+    e1.metric("현재가",      f"${price:.2f}")
+    e2.metric("VWAP",        f"${vwap:.2f}",
               delta=f"{vwap_dist:+.1f}%",
               delta_color="normal" if vwap_dist >= 0 else "inverse")
-    e3.metric("Volume Pace",  f"{vol_pace:.1f}x",
+    e3.metric("Volume Pace", f"{vol_pace:.1f}x",
               delta="강함" if vol_pace >= 3 else ("보통" if vol_pace >= 1.5 else "약함"),
               delta_color="normal" if vol_pace >= 2 else "inverse")
-    e4.metric("Day High",     f"${day_high:.2f}",
+    e4.metric("Day High",    f"${day_high:.2f}",
               delta=f"고점比 {sigs.get('from_high_pct',0):.1f}%",
               delta_color="inverse" if sigs.get("from_high_pct", 0) < -10 else "off")
-    e5.metric("종가 위치",    f"{sigs.get('close_position',0)*100:.0f}%",
-              delta="상단" if sigs.get("close_position",0) >= 0.6 else "하단",
-              delta_color="normal" if sigs.get("close_position",0) >= 0.6 else "inverse")
 
-    # ORB + 구조 신호
-    o1, o2, o3, o4, o5 = st.columns(5)
+    # Close vs High — 큼직하게 색상 등급 표시
+    e5.markdown(
+        f'<div style="padding:4px 0">'
+        f'<span style="font-size:.75rem;color:#aaa">Close vs High</span><br>'
+        f'<span style="font-size:1.5rem;font-weight:800;color:{cp_color}">'
+        f'{cp*100:.0f}%</span><br>'
+        f'<span style="font-size:.8rem;color:{cp_color}">{cp_label}</span>'
+        f'</div>',
+        unsafe_allow_html=True
+    )
+
+    # News Age
+    if age_h is not None:
+        age_str  = f"{age_h:.0f}h" if age_h >= 1 else f"{age_h*60:.0f}m"
+        age_color = "#4caf50" if age_h <= 4 else ("#ff9800" if age_h <= 24 else "#f44336")
+        e6.markdown(
+            f'<div style="padding:4px 0">'
+            f'<span style="font-size:.75rem;color:#aaa">News Age</span><br>'
+            f'<span style="font-size:1.5rem;font-weight:800;color:{age_color}">'
+            f'{age_str}</span><br>'
+            f'<span style="font-size:.8rem;color:#888">{freshness}</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+        if na.get("headline"):
+            st.caption(f"📰 {na['headline']}")
+    else:
+        e6.metric("News Age", "-")
+
+    # ── ORB + 구조 신호 Row 2 ─────────────────────────────
     orb15h = sigs.get("orb_15_high", 0)
     orb15l = sigs.get("orb_15_low",  0)
+    o1, o2, o3, o4, o5 = st.columns(5)
     o1.metric("ORB 15분 High", f"${orb15h:.2f}",
               delta="돌파" if sigs.get("above_orb_15_high") else "미달",
               delta_color="normal" if sigs.get("above_orb_15_high") else "off")
     o2.metric("ORB 15분 Low",  f"${orb15l:.2f}",
               delta="유지" if not sigs.get("orb_15_low_broken") else "이탈",
               delta_color="normal" if not sigs.get("orb_15_low_broken") else "inverse")
-    o3.metric("VWAP 위",
-              f"{sigs.get('bars_above_vwap',0)}봉 / {sigs.get('bars_below_vwap',0)}봉",
+    o3.metric("VWAP 위 / 아래",
+              f"{sigs.get('bars_above_vwap',0)} / {sigs.get('bars_below_vwap',0)}봉",
               delta="VWAP Reclaim" if sigs.get("vwap_reclaim") else "",
               delta_color="normal")
     o4.metric("Higher Low",
@@ -1753,7 +1832,7 @@ def _render_entry_panel(ticker: str, result: dict, opp_score: float):
               delta="Fakeout" if sigs.get("fakeout") else "",
               delta_color="inverse" if sigs.get("fakeout") else "off")
 
-    # 점수 구성 차트
+    # ── 점수 구성 차트 ────────────────────────────────────
     if bk:
         score_labels = ["VWAP(25)", "ORB(25)", "Volume(20)", "Structure(20)", "Position(10)"]
         score_vals   = [bk.get("vwap",0), bk.get("orb",0), bk.get("volume",0),
@@ -1766,17 +1845,37 @@ def _render_entry_panel(ticker: str, result: dict, opp_score: float):
             marker_color=bar_colors, text=score_vals, textposition="auto",
         ))
         fig.update_layout(
-            height=200, template="plotly_dark",
-            margin=dict(l=0, r=0, t=20, b=20),
+            height=180, template="plotly_dark",
+            margin=dict(l=0, r=0, t=10, b=10),
             yaxis=dict(range=[0, 25]),
             showlegend=False,
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # 실패 이유
+    # ── 실패 이유 ─────────────────────────────────────────
     fail_reasons = result.get("failed_reasons", [])
     if fail_reasons:
         st.error("실패 조건: " + " | ".join(fail_reasons))
+
+    # ── State Transition History ──────────────────────────
+    if transitions:
+        st.markdown("**📋 State Transition History**")
+        timeline_html = '<div style="font-size:.82rem;line-height:1.9">'
+        status_dot = {
+            "BUYABLE":    "🟢", "SETTING_UP": "🟡", "WEAKENING": "🟠",
+            "FAILED":     "🔴", "WATCH":      "🔵",
+        }
+        for t in transitions:
+            dot   = status_dot.get(t["status"], "⚪")
+            score = t.get("entry_score", 0)
+            timeline_html += (
+                f'<span style="color:#888">{t["time"]}</span>  '
+                f'{dot} <b>{t["status"]}</b>  '
+                f'<span style="color:#aaa">Entry {score:.0f}</span>  '
+                f'<span style="color:#666">— {t.get("reason","")[:60]}</span><br>'
+            )
+        timeline_html += "</div>"
+        st.markdown(timeline_html, unsafe_allow_html=True)
 
 
 def render_watchlist_tab():
@@ -1862,7 +1961,8 @@ def render_watchlist_tab():
         ):
             # ── Entry Analysis 결과 (분석 실행 후) ────────
             if er:
-                _render_entry_panel(ticker, er, opp_score=opp_sc)
+                _render_entry_panel(ticker, er, opp_score=opp_sc,
+                                    transitions=item.get("transitions"))
                 st.markdown("---")
 
             col_l, col_r = st.columns([2, 1])
