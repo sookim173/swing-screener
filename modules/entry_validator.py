@@ -300,6 +300,53 @@ def _top_signals(above_vwap, vwap_dist, above_orb, vol_pace, hl_count) -> str:
     return ", ".join(parts) if parts else "복합 조건 충족"
 
 
+def build_entry_timeline(
+    df_5m: pd.DataFrame,
+    avg_daily_vol: float,
+    opp_score: float = 0,
+    step: int = 3,
+) -> list[dict]:
+    """
+    5분봉 df를 시간 순으로 재생하여 각 시점의 상태를 기록.
+
+    step=3 → 15분 간격 (하루 ~26 포인트).
+    MIN_BARS=6 이전 구간은 데이터 부족으로 건너뜀.
+
+    Returns:
+        list of {time, status, entry_score, reason, bar_idx}
+    """
+    MIN_BARS = 6
+    timeline = []
+    prev_status = None
+
+    for i in range(MIN_BARS, len(df_5m) + 1, step):
+        window = df_5m.iloc[:i]
+        result = validate_entry(window, avg_daily_vol, opp_score)
+
+        # 마지막 봉의 시간 추출
+        last_idx = df_5m.index[i - 1]
+        try:
+            time_str = pd.Timestamp(last_idx).strftime("%H:%M")
+        except Exception:
+            time_str = f"bar{i}"
+
+        entry = {
+            "time":        time_str,
+            "status":      result["engine_status"],
+            "entry_score": result["entry_score"],
+            "reason":      result["reason"],
+            "bar_idx":     i,
+            "price":       result["signals"].get("price", 0),
+            "vwap":        result["signals"].get("vwap", 0),
+            "vol_pace":    result["signals"].get("volume_pace", 0),
+            "status_changed": result["engine_status"] != prev_status,
+        }
+        timeline.append(entry)
+        prev_status = result["engine_status"]
+
+    return timeline
+
+
 def _empty_result() -> dict:
     return {
         "entry_score":     0,

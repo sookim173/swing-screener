@@ -1641,37 +1641,73 @@ def _status_badge(status: str) -> str:
     return f"{icon} {status}"
 
 
-def _get_news_age(ticker: str) -> dict:
-    """가장 최근 뉴스의 경과 시간(시간 단위) + freshness 등급 반환."""
+def _get_news_age(ticker: str, added_date: str = "") -> dict:
+    """
+    뉴스 경과 시간 + freshness 등급.
+
+    "News Age" = 현재 시각 - Finnhub news datetime (Unix UTC).
+    datetime.now(timezone.utc).timestamp() 사용으로 시스템 timezone 무관하게 정확.
+
+    added_date: watchlist 추가일. 추가일 이후 뉴스 중 가장 오래된 것(원본 카탈리스트)
+    우선 표시, 없으면 가장 최신 뉴스 표시.
+    """
+    from datetime import timezone as _tz
     news = _get_news(ticker)
     if not news:
-        return {"age_h": None, "freshness": "-", "headline": ""}
-    # datetime 기준 최신 뉴스 선택
-    latest = max(news, key=lambda n: n.get("datetime", 0))
-    dt_ts  = latest.get("datetime", 0)
+        return {"age_h": None, "freshness": "-", "headline": "", "all_ages": []}
+
+    now_utc = datetime.now(_tz.utc).timestamp()
+
+    # added_date 이후 뉴스 중 가장 오래된 것 → 원본 카탈리스트 후보
+    candidate = None
+    if added_date:
+        try:
+            cutoff = datetime.strptime(added_date, "%Y-%m-%d").timestamp()
+            after = [n for n in news if n.get("datetime", 0) >= cutoff]
+            if after:
+                candidate = min(after, key=lambda n: n.get("datetime", 0))
+        except Exception:
+            pass
+
+    # fallback: 가장 최신 뉴스
+    if candidate is None:
+        candidate = max(news, key=lambda n: n.get("datetime", 0))
+
+    dt_ts = candidate.get("datetime", 0)
     if not dt_ts:
-        return {"age_h": None, "freshness": "-", "headline": ""}
-    age_h = (datetime.now().timestamp() - dt_ts) / 3600
+        return {"age_h": None, "freshness": "-", "headline": "", "all_ages": []}
+
+    age_h = (now_utc - dt_ts) / 3600
     if   age_h <= 4:   freshness = "★★★★★"
     elif age_h <= 12:  freshness = "★★★★☆"
     elif age_h <= 24:  freshness = "★★★☆☆"
     elif age_h <= 48:  freshness = "★★☆☆☆"
     else:              freshness = "★☆☆☆☆"
+
+    # 전체 뉴스 경과 시간 목록 (디버그용)
+    all_ages = sorted([
+        round((now_utc - n.get("datetime", now_utc)) / 3600, 1)
+        for n in news if n.get("datetime", 0)
+    ])
+
     return {
         "age_h":    round(age_h, 1),
         "freshness": freshness,
-        "headline":  latest.get("headline", "")[:80],
+        "headline":  candidate.get("headline", "")[:80],
+        "all_ages":  all_ages[:5],
     }
 
 
 def _run_entry_analysis(items: list) -> dict:
     """
     Watchlist 전체 종목 Entry Validation 실행.
-    transition_entry를 item["transitions"]에 기록하고 watchlist 저장.
+    - validate_entry: 현재 상태 판정
+    - build_entry_timeline: 하루치 시간별 재생
+    - transition 기록 후 watchlist 저장
     {ticker: result} 반환.
     """
     from modules.position_manager.intraday_data import get_intraday_df
-    from modules.entry_validator import validate_entry
+    from modules.entry_validator import validate_entry, build_entry_timeline
     from data.price_loader import get_ticker_info
 
     results = {}
@@ -1689,27 +1725,30 @@ def _run_entry_analysis(items: list) -> dict:
                 "reason": "Intraday 데이터 없음 (장 외 시간 또는 API 오류)",
                 "failed_reasons": [], "signals": {}, "score_breakdown": {},
                 "transition_entry": None,
-                "news_age": {"age_h": None, "freshness": "-", "headline": ""},
+                "news_age": {"age_h": None, "freshness": "-", "headline": "", "all_ages": []},
+                "timeline": [],
             }
         else:
-            info      = get_ticker_info(ticker)
-            avg_vol   = info.get("avg_volume", 0) or 1
-            result    = validate_entry(df_5m, avg_vol, item.get("opp_score", 0))
-            result["news_age"] = _get_news_age(ticker)
+            info    = get_ticker_info(ticker)
+            avg_vol = info.get("avg_volume", 0) or 1
+            opp_sc  = item.get("opp_score", 0)
 
-        # Transition 기록: 직전 마지막 기록과 status가 다르거나 처음이면 추가
+            result           = validate_entry(df_5m, avg_vol, opp_sc)
+            result["news_age"] = _get_news_age(ticker, item.get("added_date", ""))
+            result["timeline"] = build_entry_timeline(df_5m, avg_vol, opp_sc, step=3)
+
+        # Transition 기록 (상태 변화 시만 append)
         te = result.get("transition_entry")
         if te:
             transitions = item.setdefault("transitions", [])
             if not transitions or transitions[-1]["status"] != te["status"]:
                 transitions.append(te)
-            # 최대 20개 유지
             item["transitions"] = transitions[-20:]
 
         results[ticker] = result
 
     prog.empty()
-    save_watchlist(items)   # transition 기록 영구 저장
+    save_watchlist(items)
     return results
 
 
@@ -1721,6 +1760,88 @@ def _entry_status_color(status: str) -> str:
         "FAILED":     "#b71c1c",
         "WATCH":      "#1565c0",
     }.get(status, "#444")
+
+
+_STATUS_PLOTLY_COLOR = {
+    "BUYABLE":    "#4caf50",
+    "SETTING_UP": "#ffca28",
+    "WEAKENING":  "#ff7043",
+    "FAILED":     "#ef5350",
+    "WATCH":      "#42a5f5",
+}
+
+_STATUS_DOT = {
+    "BUYABLE": "🟢", "SETTING_UP": "🟡",
+    "WEAKENING": "🟠", "FAILED": "🔴", "WATCH": "🔵",
+}
+
+
+def _render_timeline_chart(timeline: list):
+    """Entry Score 시간별 라인 차트 + 상태 색상 마커."""
+    import plotly.graph_objects as go
+
+    times  = [t["time"] for t in timeline]
+    scores = [t["entry_score"] for t in timeline]
+    colors = [_STATUS_PLOTLY_COLOR.get(t["status"], "#888") for t in timeline]
+    labels = [f"{t['time']}<br>{t['status']}<br>Score {t['entry_score']:.0f}" for t in timeline]
+
+    fig = go.Figure()
+
+    # Entry Score 라인
+    fig.add_trace(go.Scatter(
+        x=times, y=scores,
+        mode="lines",
+        line=dict(color="#546e7a", width=1.5),
+        showlegend=False,
+    ))
+
+    # 상태별 색상 마커
+    fig.add_trace(go.Scatter(
+        x=times, y=scores,
+        mode="markers",
+        marker=dict(color=colors, size=9, line=dict(width=1, color="#222")),
+        text=labels,
+        hoverinfo="text",
+        showlegend=False,
+    ))
+
+    # 기준선: BUYABLE threshold (65)
+    fig.add_hline(y=65, line=dict(color="#4caf50", dash="dot", width=1),
+                  annotation_text="BUYABLE 기준 65", annotation_position="right")
+
+    fig.update_layout(
+        height=220, template="plotly_dark",
+        margin=dict(l=0, r=60, t=10, b=30),
+        xaxis=dict(title="", tickangle=-45, tickfont=dict(size=9)),
+        yaxis=dict(range=[0, 100], title="Entry Score"),
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 상태 변화 구간 강조 텍스트
+    changes = [t for t in timeline if t.get("status_changed")]
+    if changes:
+        change_strs = [
+            f"{_STATUS_DOT.get(t['status'],'⚪')} **{t['time']}** {t['status']} ({t['entry_score']:.0f})"
+            for t in changes
+        ]
+        st.caption("상태 변화: " + "  →  ".join(change_strs))
+
+
+def _render_transition_log(transitions: list):
+    """저장된 상태 전환 로그 (분석 실행마다 기록)."""
+    html = '<div style="font-size:.82rem;line-height:2.0">'
+    for t in transitions:
+        dot   = _STATUS_DOT.get(t["status"], "⚪")
+        score = t.get("entry_score", 0)
+        html += (
+            f'<span style="color:#888;min-width:90px;display:inline-block">{t["time"]}</span>'
+            f'{dot} <b style="min-width:100px;display:inline-block">{t["status"]}</b>'
+            f'<span style="color:#aaa;margin:0 8px">Entry {score:.0f}</span>'
+            f'<span style="color:#666">— {t.get("reason","")[:70]}</span><br>'
+        )
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def _close_vs_high_grade(close_pos: float) -> tuple[str, str]:
@@ -1832,50 +1953,50 @@ def _render_entry_panel(ticker: str, result: dict, opp_score: float,
               delta="Fakeout" if sigs.get("fakeout") else "",
               delta_color="inverse" if sigs.get("fakeout") else "off")
 
-    # ── 점수 구성 차트 ────────────────────────────────────
-    if bk:
-        score_labels = ["VWAP(25)", "ORB(25)", "Volume(20)", "Structure(20)", "Position(10)"]
-        score_vals   = [bk.get("vwap",0), bk.get("orb",0), bk.get("volume",0),
-                        bk.get("structure",0), bk.get("position",0)]
-        max_vals     = [25, 25, 20, 20, 10]
-        bar_colors   = ["#4caf50" if v >= m * 0.7 else ("#ff9800" if v >= m * 0.4 else "#f44336")
-                        for v, m in zip(score_vals, max_vals)]
-        fig = go.Figure(go.Bar(
-            x=score_labels, y=score_vals,
-            marker_color=bar_colors, text=score_vals, textposition="auto",
-        ))
-        fig.update_layout(
-            height=180, template="plotly_dark",
-            margin=dict(l=0, r=0, t=10, b=10),
-            yaxis=dict(range=[0, 25]),
-            showlegend=False,
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    # ── 두 차트 나란히: Score 구성 | Entry Timeline ────────
+    chart_col1, chart_col2 = st.columns([1, 2])
+
+    with chart_col1:
+        if bk:
+            st.caption("Entry Score 구성")
+            score_labels = ["VWAP\n(25)", "ORB\n(25)", "Vol\n(20)", "Struct\n(20)", "Pos\n(10)"]
+            score_vals   = [bk.get("vwap",0), bk.get("orb",0), bk.get("volume",0),
+                            bk.get("structure",0), bk.get("position",0)]
+            max_vals     = [25, 25, 20, 20, 10]
+            bar_colors   = ["#4caf50" if v >= m*0.7 else ("#ff9800" if v >= m*0.4 else "#f44336")
+                            for v, m in zip(score_vals, max_vals)]
+            fig_bk = go.Figure(go.Bar(
+                x=score_labels, y=score_vals,
+                marker_color=bar_colors, text=score_vals, textposition="auto",
+            ))
+            fig_bk.update_layout(
+                height=220, template="plotly_dark",
+                margin=dict(l=0, r=0, t=10, b=10),
+                yaxis=dict(range=[0, 25]),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_bk, use_container_width=True)
+
+    with chart_col2:
+        timeline_data = result.get("timeline", [])
+        if timeline_data:
+            st.caption("Entry Timeline — 시간별 상태 변화")
+            _render_timeline_chart(timeline_data)
 
     # ── 실패 이유 ─────────────────────────────────────────
     fail_reasons = result.get("failed_reasons", [])
     if fail_reasons:
         st.error("실패 조건: " + " | ".join(fail_reasons))
 
-    # ── State Transition History ──────────────────────────
+    # ── State Transition History (상태 변화 시점만) ────────
     if transitions:
-        st.markdown("**📋 State Transition History**")
-        timeline_html = '<div style="font-size:.82rem;line-height:1.9">'
-        status_dot = {
-            "BUYABLE":    "🟢", "SETTING_UP": "🟡", "WEAKENING": "🟠",
-            "FAILED":     "🔴", "WATCH":      "🔵",
-        }
-        for t in transitions:
-            dot   = status_dot.get(t["status"], "⚪")
-            score = t.get("entry_score", 0)
-            timeline_html += (
-                f'<span style="color:#888">{t["time"]}</span>  '
-                f'{dot} <b>{t["status"]}</b>  '
-                f'<span style="color:#aaa">Entry {score:.0f}</span>  '
-                f'<span style="color:#666">— {t.get("reason","")[:60]}</span><br>'
-            )
-        timeline_html += "</div>"
-        st.markdown(timeline_html, unsafe_allow_html=True)
+        st.markdown("**📋 State Transition Log** (상태 변화 시점)")
+        _render_transition_log(transitions)
+
+    # ── News Age all_ages 힌트 ────────────────────────────
+    all_ages = na.get("all_ages", [])
+    if len(all_ages) > 1:
+        st.caption(f"뉴스 경과 시간 분포: {all_ages} h (가장 오래된 것이 원본 카탈리스트 후보)")
 
 
 def render_watchlist_tab():
