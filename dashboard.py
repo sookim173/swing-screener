@@ -177,7 +177,56 @@ def generate_ai_summary(row: dict) -> str:
     return "  \n".join(parts)
 
 
-POSITIONS_FILE = "positions.json"
+POSITIONS_FILE  = "positions.json"
+WATCHLIST_FILE  = "watchlist.json"
+
+
+def load_watchlist() -> list:
+    if not os.path.exists(WATCHLIST_FILE):
+        return []
+    try:
+        with open(WATCHLIST_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_watchlist(items: list):
+    with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+        json.dump(items, f, indent=2, ensure_ascii=False)
+
+
+def add_to_watchlist(row: dict):
+    """Screener 결과 row → watchlist.json에 추가. 중복 시 스킵."""
+    items = load_watchlist()
+    if any(it["ticker"] == row["Ticker"] for it in items):
+        return False
+    try:
+        entry_v  = float(row.get("Entry") or 0)
+        stop_v   = float(row.get("Stop")  or 0)
+        target_v = float(row.get("Target") or 0)
+    except (TypeError, ValueError):
+        entry_v = stop_v = target_v = 0.0
+    items.append({
+        "ticker":     row["Ticker"],
+        "added_date": date.today().isoformat(),
+        "opp_score":  row.get("Opp_Score", row.get("Score", 0)),
+        "pattern":    row.get("Pattern", ""),
+        "catalyst":   row.get("Catalyst", ""),
+        "price":      row.get("Price", 0),
+        "entry":      entry_v,
+        "stop":       stop_v,
+        "target":     target_v,
+        "rr":         row.get("R:R", 0),
+        "rvol":       row.get("RVOL", 0),
+        "float_m":    row.get("Float_M", 0),
+        "pm_gap":     row.get("PM_Gap", "-"),
+        "note":       "",
+        "status":     "WATCH",
+    })
+    save_watchlist(items)
+    return True
+
 
 def load_positions() -> list:
     if not os.path.exists(POSITIONS_FILE):
@@ -797,6 +846,8 @@ def run_screener_cached(tickers: list):
             "":             grade_color(final["grade"]),
             "Ticker":       ticker,
             "Grade":        final["grade"],
+            "Opp_Score":    final["opp_score"],
+            "Entry_Hint":   final["entry_hint"],
             "Score":        score,
             "Pattern":      pattern,
             "Price":        ind["close"],
@@ -923,7 +974,7 @@ def render_screener_tab():
         return
 
     st.subheader("Candidates")
-    display_cols = ["", "Ticker", "Grade", "Score", "Pattern", "Price",
+    display_cols = ["", "Ticker", "Grade", "Opp_Score", "Entry_Hint", "Pattern", "Price",
                     "RVOL", "RVOL_3D", "5D%", "RS_QQQ", "Float_M", "Short%",
                     "PM_Gap", "Catalyst", "Next_Earn", "ATR",
                     "Entry", "Stop", "ATR_Stop", "Target", "R:R", "Ready"]
@@ -933,11 +984,41 @@ def render_screener_tab():
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.1f"),
+            "Opp_Score":  st.column_config.ProgressColumn(
+                "Opp Score", min_value=0, max_value=100, format="%.1f",
+                help="Phase 1: Market+Ignition+Catalyst+Supply (EOD기반, /100)"),
+            "Entry_Hint": st.column_config.NumberColumn(
+                "Entry Hint", format="%.1f",
+                help="Chart+Risk 힌트 (EOD proxy). Phase 2에서 Intraday 기반으로 교체 예정"),
             "R:R":   st.column_config.NumberColumn("R:R", format="%.2f"),
             "ATR":   st.column_config.NumberColumn("ATR", format="%.2f"),
         }
     )
+
+    # ── Watchlist 추가 ────────────────────────────────────
+    st.markdown("#### ★ Watchlist에 추가")
+    st.caption("Phase 2 진입 분석 대상으로 저장합니다. Watchlist 탭에서 확인·관리하세요.")
+    ticker_options_wl = df["Ticker"].tolist() if not df.empty else []
+    already_wl = [it["ticker"] for it in load_watchlist()]
+    available  = [t for t in ticker_options_wl if t not in already_wl]
+    if available:
+        selected_wl = st.multiselect(
+            "종목 선택 (복수 가능)",
+            options=available,
+            key="wl_add_multi",
+        )
+        if st.button("Watchlist에 추가", key="wl_add_btn", type="primary"):
+            added = []
+            for t in selected_wl:
+                row_data = df[df["Ticker"] == t].iloc[0].to_dict()
+                if add_to_watchlist(row_data):
+                    added.append(t)
+            if added:
+                st.success(f"추가됨: {', '.join(added)}")
+            else:
+                st.info("선택한 종목이 이미 Watchlist에 있습니다.")
+    else:
+        st.info("모든 후보가 이미 Watchlist에 있습니다.")
 
     # Trade plan detail
     ready_df = df[df["Ready"] == "✅ YES"] if "Ready" in df.columns else pd.DataFrame()
@@ -1542,7 +1623,182 @@ def render_monitor_tab():
 
 
 # ════════════════════════════════════════════════════════
-#  TAB 3: JOURNAL
+#  TAB 3: WATCHLIST  (Phase 1 → Phase 2 브릿지)
+# ════════════════════════════════════════════════════════
+
+_STATUS_OPTS   = ["WATCH", "SETTING_UP", "BUYABLE", "FAILED", "PROMOTED"]
+_STATUS_COLOR  = {
+    "WATCH":       ("#1565c0", "👀"),
+    "SETTING_UP":  ("#f57f17", "🔄"),
+    "BUYABLE":     ("#1b5e20", "✅"),
+    "FAILED":      ("#b71c1c", "❌"),
+    "PROMOTED":    ("#4a148c", "📌"),
+}
+
+
+def _status_badge(status: str) -> str:
+    dot, icon = _STATUS_COLOR.get(status, ("#888", "⚪"))[0], _STATUS_COLOR.get(status, ("#888", "⚪"))[1]
+    return f"{icon} {status}"
+
+
+def render_watchlist_tab():
+    st.subheader("Watchlist — Phase 2 대기 종목")
+    st.caption(
+        "Screener에서 선택한 후보들을 추적합니다. "
+        "Status를 업데이트하고 진입 준비가 되면 Monitor로 승격하세요."
+    )
+
+    items = load_watchlist()
+    if not items:
+        st.info("Watchlist가 비어 있습니다. Screener 탭에서 종목을 추가하세요.")
+        return
+
+    # ── 요약 메트릭 ──────────────────────────────────────
+    total      = len(items)
+    buyable    = sum(1 for it in items if it["status"] == "BUYABLE")
+    setting_up = sum(1 for it in items if it["status"] == "SETTING_UP")
+    watch      = sum(1 for it in items if it["status"] == "WATCH")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("전체",        total)
+    m2.metric("BUYABLE",     buyable,    delta="진입 가능" if buyable else None)
+    m3.metric("SETTING UP",  setting_up)
+    m4.metric("WATCH",       watch)
+
+    st.markdown("---")
+
+    # ── 종목 카드 ─────────────────────────────────────────
+    updated = False
+    remove_tickers = []
+
+    for idx, item in enumerate(items):
+        ticker  = item["ticker"]
+        status  = item.get("status", "WATCH")
+        dot     = _STATUS_COLOR.get(status, ("#888", "⚪"))[1]
+        opp_sc  = item.get("opp_score", 0)
+        pattern = item.get("pattern", "-")
+        added   = item.get("added_date", "")
+
+        with st.expander(
+            f"{dot} **{ticker}**  |  Opp {opp_sc:.1f}  |  {pattern}  |  {status}  |  {added}",
+            expanded=(status in ("BUYABLE", "SETTING_UP"))
+        ):
+            col_l, col_r = st.columns([2, 1])
+
+            with col_l:
+                # 핵심 지표 행
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Price",   f"${item.get('price', 0):.2f}")
+                c2.metric("Entry",   f"${item.get('entry', 0):.2f}" if item.get('entry') else "-")
+                c3.metric("Stop",    f"${item.get('stop',  0):.2f}" if item.get('stop')  else "-")
+                c4.metric("Target",  f"${item.get('target',0):.2f}" if item.get('target') else "-")
+                c5.metric("R:R",     f"{item.get('rr', 0):.2f}"    if item.get('rr')     else "-")
+
+                d1, d2, d3 = st.columns(3)
+                d1.metric("Opp Score", f"{opp_sc:.1f}")
+                d2.metric("RVOL",      f"{item.get('rvol', 0):.1f}x")
+                d3.metric("Float",     f"{item.get('float_m', 0):.1f}M")
+
+                # 메모
+                new_note = st.text_area(
+                    "메모",
+                    value=item.get("note", ""),
+                    height=60,
+                    key=f"note_{ticker}_{idx}",
+                    placeholder="진입 조건, 관찰 포인트 등 자유롭게 기록",
+                )
+                if new_note != item.get("note", ""):
+                    item["note"] = new_note
+                    updated = True
+
+            with col_r:
+                # Status 변경
+                new_status = st.selectbox(
+                    "Status",
+                    options=_STATUS_OPTS,
+                    index=_STATUS_OPTS.index(status) if status in _STATUS_OPTS else 0,
+                    key=f"status_{ticker}_{idx}",
+                )
+                if new_status != status:
+                    item["status"] = new_status
+                    updated = True
+
+                st.markdown("")
+
+                # Monitor로 승격
+                if st.button("📌 Monitor로 승격", key=f"promote_{ticker}_{idx}",
+                             use_container_width=True):
+                    positions = load_positions()
+                    if ticker not in [p["ticker"] for p in positions]:
+                        entry_v = item.get("entry") or item.get("price") or 0
+                        stop_v  = item.get("stop")  or 0
+                        risk    = round(float(entry_v) - float(stop_v), 2) if entry_v and stop_v else float(entry_v) * 0.05
+                        positions.append({
+                            "ticker":          ticker,
+                            "entry_date":      date.today().isoformat(),
+                            "entry_price":     float(entry_v),
+                            "shares":          0,
+                            "structural_stop": float(stop_v),
+                            "current_stop":    float(stop_v),
+                            "initial_target":  float(item.get("target") or 0),
+                            "risk_per_share":  max(risk, 0.01),
+                            "pattern":         item.get("pattern", ""),
+                            "catalyst":        item.get("catalyst", ""),
+                            "sector_etf":      "QQQ",
+                            "qqq_ret_at_entry": 0.0,
+                        })
+                        save_positions(positions)
+                        item["status"] = "PROMOTED"
+                        updated = True
+                        st.success(f"{ticker} → Monitor에 추가됨")
+                    else:
+                        st.info(f"{ticker}은 이미 Monitor에 있습니다.")
+
+                # 제거
+                if st.button("🗑 제거", key=f"remove_{ticker}_{idx}",
+                             use_container_width=True):
+                    remove_tickers.append(ticker)
+
+    # 변경사항 저장
+    if remove_tickers:
+        items = [it for it in items if it["ticker"] not in remove_tickers]
+        updated = True
+
+    if updated:
+        save_watchlist(items)
+        st.rerun()
+
+    # ── 테이블 요약 뷰 ────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 전체 목록")
+    summary_rows = []
+    for it in items:
+        summary_rows.append({
+            "Status":    _status_badge(it.get("status", "WATCH")),
+            "Ticker":    it["ticker"],
+            "Opp Score": it.get("opp_score", 0),
+            "Pattern":   it.get("pattern", "-"),
+            "Catalyst":  it.get("catalyst", "-"),
+            "Price":     it.get("price", 0),
+            "Entry":     it.get("entry", 0),
+            "R:R":       it.get("rr", 0),
+            "Added":     it.get("added_date", ""),
+            "Note":      it.get("note", "")[:40],
+        })
+    if summary_rows:
+        st.dataframe(
+            pd.DataFrame(summary_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Opp Score": st.column_config.ProgressColumn(
+                    "Opp Score", min_value=0, max_value=100, format="%.1f"),
+            }
+        )
+
+
+# ════════════════════════════════════════════════════════
+#  TAB 4: JOURNAL
 # ════════════════════════════════════════════════════════
 
 def render_journal_tab():
@@ -1593,13 +1849,16 @@ def render_journal_tab():
 st.sidebar.title("Swing Screener")
 st.sidebar.markdown("---")
 
-tab1, tab2, tab3 = st.tabs(["Screener", "Position Monitor", "Journal"])
+tab1, tab2, tab3, tab4 = st.tabs(["Screener", "Watchlist", "Position Monitor", "Journal"])
 
 with tab1:
     render_screener_tab()
 
 with tab2:
-    render_monitor_tab()
+    render_watchlist_tab()
 
 with tab3:
+    render_monitor_tab()
+
+with tab4:
     render_journal_tab()

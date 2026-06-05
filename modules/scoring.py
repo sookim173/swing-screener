@@ -1,14 +1,17 @@
 """
 modules/scoring.py
 Aggregates all module scores into final score (100pts)
-6-Module Framework: Market, Ignition, Quality, Supply, Chart, Risk
 
-1주일 스윙 매매 기준 비중 (선별 → 진입 분리 원칙):
+Phase 1 — Opportunity Score (EOD/Premarket, scaled to 100):
   Market Regime   10pts  — 시장 허가증
   Ignition/RVOL   25pts  — 지금 돈이 들어오는가 (가장 중요)
   Catalyst        20pts  — 왜 오르는가
   Supply          20pts  — 얼마나 움직일 수 있는가 (Float+Short)
-  Chart           15pts  — 어디서 들어갈 것인가 (진입 타이밍)
+  ──────────────────────────────────────────────────────
+  Subtotal        75pts  → scaled to 100 = Opportunity Score
+
+Phase 2 — Entry Score (Intraday, future):
+  Chart           15pts  — 어디서 들어갈 것인가 (EOD proxy, Phase 2에서 교체)
   Risk/Trade      10pts  — R:R 검증
 """
 
@@ -80,28 +83,43 @@ def calculate_final_score(
         risk_pts = 0
     breakdown["risk"] = risk_pts
 
-    # ── Total ─────────────────────────────────────────────────
+    # ── Opportunity Score (Phase 1: EOD 기반, 75pts → 100 스케일) ──
+    opp_raw = (
+        breakdown["market"] +
+        breakdown["ignition"] +
+        breakdown["quality"] +
+        breakdown["supply"]
+    )
+    opp_score = round(min(opp_raw / 75 * 100, 100), 1)
+
+    # ── Entry Hint Score (Phase 2 대체 전 EOD proxy, 25pts) ─────
+    entry_hint = round(breakdown["chart"] + breakdown["risk"], 1)
+
+    # ── Total (backward compat) ───────────────────────────────
     total = sum(breakdown.values())
     total = round(min(total, 100), 1)
 
-    if total >= SCORE_A:
+    # Grade는 Opportunity Score 기준
+    if opp_score >= SCORE_A:
         grade = "A"
-    elif total >= SCORE_B:
+    elif opp_score >= SCORE_B:
         grade = "B"
-    elif total >= SCORE_C:
+    elif opp_score >= SCORE_C:
         grade = "C"
     else:
         grade = "D"
 
-    # Trade ready: score + market + trade plan all must pass
+    # Trade ready: opp_score + market + trade plan
     trade_ready = (
-        total >= SCORE_B and
+        opp_score >= SCORE_B and
         market_score >= MARKET_SCORE_TRADE and
         trade_plan.get("trade_ready", False)
     )
 
     return {
         "total_score": total,
+        "opp_score": opp_score,
+        "entry_hint": entry_hint,
         "grade": grade,
         "breakdown": breakdown,
         "trade_ready": trade_ready,
