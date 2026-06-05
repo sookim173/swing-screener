@@ -198,6 +198,113 @@ def save_positions(positions: list):
 #  TAB 1: SCREENER
 # ════════════════════════════════════════════════════════
 
+def render_market_score_detail(score: int | str, action: str, regime: dict):
+    """Market Score 구성 요인을 한 눈에 볼 수 있는 설명 패널."""
+
+    ACTION_COLOR = {
+        "AGGRESSIVE":      ("#1b5e20", "🟢", "공격적 진입 가능 — 시장이 강세. 좋은 셋업은 풀 사이즈로."),
+        "SELECTIVE":       ("#1565c0", "🔵", "선별적 진입 — 시장 양호하나 완벽한 셋업만 집중."),
+        "WATCHLIST_ONLY":  ("#e65100", "🟡", "관찰만 — 신규 진입 자제. 기존 포지션만 관리."),
+        "NO_NEW_ENTRIES":  ("#b71c1c", "🔴", "신규 진입 금지 — 시장 약세. 현금 보유 우선."),
+    }
+    bg, dot, action_desc = ACTION_COLOR.get(action, ("#333", "⚪", action))
+
+    with st.expander(f"{dot} **Market Score {score}/100 — {action}** (클릭하여 상세 보기)", expanded=False):
+        st.markdown(
+            f'<div style="background:{bg}22;border-left:4px solid {bg};padding:8px 14px;'
+            f'border-radius:4px;margin-bottom:12px">'
+            f'<span style="color:#fff;font-size:.9rem">{action_desc}</span></div>',
+            unsafe_allow_html=True
+        )
+
+        # 점수 구성 테이블
+        rows = []
+
+        # QQQ
+        qqq_above = regime.get("qqq_above_ma20")
+        qqq_5d    = regime.get("qqq_5d", 0)
+        if qqq_above is not None:
+            if qqq_above:
+                rows.append(("QQQ", "+30pt", "QQQ 종가 > 20일 MA",
+                              f"나스닥 추세 살아있음. 성장주 환경 우호적."))
+            else:
+                rows.append(("QQQ", "+0pt", "QQQ 종가 < 20일 MA",
+                              f"나스닥 추세 훼손. 성장주 환경 악화."))
+
+            if qqq_5d > 0.01:
+                rows.append(("QQQ 5D", "+15pt", f"QQQ 5일 수익률 {qqq_5d:+.1%} (> +1%)",
+                              "단기 모멘텀 강함. 매수세 유입 중."))
+            elif qqq_5d > -0.01:
+                rows.append(("QQQ 5D", "+5pt", f"QQQ 5일 수익률 {qqq_5d:+.1%} (−1%~+1%)",
+                              "단기 횡보. 방향성 불분명."))
+            else:
+                rows.append(("QQQ 5D", "+0pt", f"QQQ 5일 수익률 {qqq_5d:+.1%} (< −1%)",
+                              "단기 하락 압력. 신규 진입 주의."))
+
+        # SPY
+        spy_above = regime.get("spy_above_ma20")
+        if spy_above is not None:
+            if spy_above:
+                rows.append(("SPY", "+20pt", "SPY 종가 > 20일 MA",
+                              "S&P500 추세 유지. 시장 전반 건강."))
+            else:
+                rows.append(("SPY", "+0pt", "SPY 종가 < 20일 MA",
+                              "S&P500 추세 이탈. 광범위한 약세."))
+
+        # IWM
+        iwm_above = regime.get("iwm_above_ma20")
+        if iwm_above is not None:
+            if iwm_above:
+                rows.append(("IWM", "+20pt", "IWM(소형주) 종가 > 20일 MA",
+                              "소형주 강세 = 위험 선호 환경. 스윙에 유리."))
+            else:
+                rows.append(("IWM", "+0pt", "IWM(소형주) 종가 < 20일 MA",
+                              "소형주 약세 = 안전 자산 선호. 스윙 리스크 증가."))
+
+        # VIX
+        vix_level  = regime.get("vix_level")
+        vix_5d_chg = regime.get("vix_5d_change", 0)
+        if vix_level is not None:
+            if vix_level < 20:
+                vix_pt = "+15pt"
+                vix_note = "공포 낮음. 시장 안정적."
+            elif vix_level < 25:
+                vix_pt = "+8pt"
+                vix_note = "약간 불안. 변동성 주의."
+            elif vix_level > 30:
+                vix_pt = "−15pt"
+                vix_note = "공포 구간. 급락 리스크 높음."
+            else:
+                vix_pt = "+0pt"
+                vix_note = "중립 구간."
+            rows.append(("VIX", vix_pt, f"VIX {vix_level:.1f}", vix_note))
+
+            if vix_5d_chg > 0.20:
+                rows.append(("VIX 급등", "−10pt", f"VIX 5일 변화 {vix_5d_chg:+.0%} (> +20%)",
+                              "공포 급격히 증가. 매도 압력 확대 중."))
+
+        # 테이블 렌더링
+        for etf, pts, condition, meaning in rows:
+            color = "#4caf50" if pts.startswith("+") and pts != "+0pt" else \
+                    ("#f44336" if pts.startswith("−") else "#888")
+            st.markdown(
+                f'<div style="display:flex;align-items:baseline;gap:10px;margin:4px 0">'
+                f'<span style="min-width:60px;font-weight:700;color:#aaa;font-size:.8rem">{etf}</span>'
+                f'<span style="min-width:52px;font-weight:700;color:{color};font-size:.9rem">{pts}</span>'
+                f'<span style="color:#ddd;font-size:.85rem">{condition}</span>'
+                f'<span style="color:#888;font-size:.8rem;margin-left:6px">— {meaning}</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+
+        # 최대 점수 안내
+        st.markdown(
+            '<div style="margin-top:10px;color:#666;font-size:.78rem">'
+            '최대 가능 점수: QQQ MA(30) + QQQ 5D(15) + SPY(20) + IWM(20) + VIX(15) = 100pt</div>',
+            unsafe_allow_html=True
+        )
+
+
 def render_ticker_detail(ticker: str, df: pd.DataFrame):
     """Screener 후보 티커의 상세 리포트: 차트 + 지표 설명 + 뉴스."""
     import plotly.graph_objects as go
@@ -740,7 +847,7 @@ def run_screener_cached(tickers: list):
     progress.empty()
     df_r = pd.DataFrame(results).sort_values("Score", ascending=False).reset_index(drop=True) if results else pd.DataFrame()
     df_n = pd.DataFrame(near_miss).sort_values("Score", ascending=False, na_position="last").reset_index(drop=True) if near_miss else pd.DataFrame()
-    return df_r, df_n, market_score, action
+    return df_r, df_n, market_score, action, regime
 
 
 def render_screener_tab():
@@ -768,9 +875,10 @@ def render_screener_tab():
             st.error(f"No tickers found in {universe_file}")
         else:
             with st.spinner("Running screener..."):
-                df_r, df_n, mkt, act = run_screener_cached(tickers)
+                df_r, df_n, mkt, act, regime = run_screener_cached(tickers)
             st.session_state.update({"sc_results": df_r, "sc_nearmiss": df_n,
-                                     "sc_market": mkt, "sc_action": act})
+                                     "sc_market": mkt, "sc_action": act,
+                                     "sc_regime": regime})
             os.makedirs("output", exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M")
             if not df_r.empty:
@@ -790,10 +898,11 @@ def render_screener_tab():
         st.info("Click **Run Screener** in the sidebar to start.")
         return
 
-    df  = st.session_state["sc_results"]
-    nm  = st.session_state.get("sc_nearmiss", pd.DataFrame())
-    mkt = st.session_state.get("sc_market", "-")
-    act = st.session_state.get("sc_action", "-")
+    df     = st.session_state["sc_results"]
+    nm     = st.session_state.get("sc_nearmiss", pd.DataFrame())
+    mkt    = st.session_state.get("sc_market", "-")
+    act    = st.session_state.get("sc_action", "-")
+    regime = st.session_state.get("sc_regime", {})
 
     # Metric bar
     c1, c2, c3, c4 = st.columns(4)
@@ -802,6 +911,11 @@ def render_screener_tab():
     ready_n = len(df[df["Ready"] == "✅ YES"]) if not df.empty and "Ready" in df.columns else 0
     c3.metric("Trade Ready", ready_n)
     c4.metric("Watch List", len(df) - ready_n if not df.empty else 0)
+
+    # Market Score 상세 설명
+    if regime:
+        render_market_score_detail(mkt, act, regime)
+
     st.markdown("---")
 
     if df.empty:
