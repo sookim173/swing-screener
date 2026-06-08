@@ -1953,16 +1953,39 @@ def _render_entry_panel(ticker: str, result: dict, opp_score: float,
               delta="Fakeout" if sigs.get("fakeout") else "",
               delta_color="inverse" if sigs.get("fakeout") else "off")
 
+    # ── Pivot Distance Row ────────────────────────────────
+    pivot_low = sigs.get("recent_pivot_low")
+    pivot_dist = sigs.get("pivot_dist_pct")
+    p1, p2, p3 = st.columns([1, 1, 3])
+    p1.metric(
+        "Pivot Low",
+        f"${pivot_low:.2f}" if pivot_low else "-",
+        delta_color="off",
+    )
+    if pivot_dist is not None:
+        _pd_color = "normal" if pivot_dist <= 2 else ("off" if pivot_dist <= 4 else "inverse")
+        _pd_label = ("✅ 최적" if pivot_dist <= 2 else
+                     ("🟡 양호" if pivot_dist <= 4 else
+                      ("🟠 주의" if pivot_dist <= 6 else "🔴 늦음")))
+        p2.metric(
+            "Pivot 거리",
+            f"+{pivot_dist:.1f}%",
+            delta=_pd_label,
+            delta_color=_pd_color,
+        )
+    else:
+        p2.metric("Pivot 거리", "-", delta_color="off")
+
     # ── 두 차트 나란히: Score 구성 | Entry Timeline ────────
     chart_col1, chart_col2 = st.columns([1, 2])
 
     with chart_col1:
         if bk:
             st.caption("Entry Score 구성")
-            score_labels = ["VWAP\n(25)", "ORB\n(25)", "Vol\n(20)", "Struct\n(20)", "Pos\n(10)"]
+            score_labels = ["VWAP\n(25)", "ORB\n(25)", "Vol\n(10)", "Struct\n(20)", "Pivot\nDist(20)"]
             score_vals   = [bk.get("vwap",0), bk.get("orb",0), bk.get("volume",0),
-                            bk.get("structure",0), bk.get("position",0)]
-            max_vals     = [25, 25, 20, 20, 10]
+                            bk.get("structure",0), bk.get("pivot_distance",0)]
+            max_vals     = [25, 25, 10, 20, 20]
             bar_colors   = ["#4caf50" if v >= m*0.7 else ("#ff9800" if v >= m*0.4 else "#f44336")
                             for v, m in zip(score_vals, max_vals)]
             fig_bk = go.Figure(go.Bar(

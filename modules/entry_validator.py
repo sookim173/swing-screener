@@ -8,11 +8,11 @@ State Machine:
                   → FAILED (directly)
 
 Entry Score (0-100):
-  VWAP      25pts
-  ORB       25pts
-  Volume    20pts
-  Structure 20pts
-  Position  10pts
+  VWAP           25pts
+  ORB            25pts
+  Volume         10pts  (↓ from 20 — weight shifted to pivot distance)
+  Structure      20pts
+  Pivot Distance 20pts  (NEW — current price vs recent pivot low)
 """
 
 import pandas as pd
@@ -111,6 +111,13 @@ def validate_entry(
     day_range       = day_high - day_low
     close_position  = round((price - day_low) / day_range, 3) if day_range > 0 else 0.5
 
+    # ── 5-pre. Pivot Distance ─────────────────────────────
+    # 최근 확인된 pivot low(눌림 저점)에서 현재가까지의 거리 %
+    # 진입 타이밍이 pivot에 가까울수록 고점수 (RR 우수), 멀수록 저점수
+    recent_pivot_low  = _get_recent_pivot_low(low)
+    pivot_dist_pct    = round((price - recent_pivot_low) / recent_pivot_low * 100, 2) \
+                        if recent_pivot_low and recent_pivot_low > 0 else None
+
     # ── 5. Entry Score ────────────────────────────────────
     score_breakdown = {}
 
@@ -131,14 +138,14 @@ def validate_entry(
     if fakeout:                orb_pts = max(orb_pts - 8, 0)
     score_breakdown["orb"] = min(orb_pts, 25)
 
-    # Volume Pace (20pts)
-    if   volume_pace >= 5: vol_pts = 20
-    elif volume_pace >= 3: vol_pts = 15
-    elif volume_pace >= 2: vol_pts = 10
-    elif volume_pace >= 1.5: vol_pts = 5
-    else:                  vol_pts = 0
-    if volume_fade:  vol_pts = max(vol_pts - 8, 0)
-    if volume_surge: vol_pts = min(vol_pts + 3, 20)
+    # Volume Pace (10pts)  ← 20→10으로 축소 (pivot_distance에 가중치 이동)
+    if   volume_pace >= 5:   vol_pts = 10
+    elif volume_pace >= 3:   vol_pts = 8
+    elif volume_pace >= 2:   vol_pts = 5
+    elif volume_pace >= 1.5: vol_pts = 2
+    else:                    vol_pts = 0
+    if volume_fade:  vol_pts = max(vol_pts - 4, 0)
+    if volume_surge: vol_pts = min(vol_pts + 2, 10)
     score_breakdown["volume"] = vol_pts
 
     # Structure (20pts)
@@ -147,12 +154,17 @@ def validate_entry(
     elif lower_high_count >= 2: struct_pts = max(struct_pts - 5, 0)
     score_breakdown["structure"] = min(struct_pts, 20)
 
-    # Close Position (10pts)
-    if   close_position >= 0.8: pos_pts = 10
-    elif close_position >= 0.6: pos_pts = 7
-    elif close_position >= 0.4: pos_pts = 4
-    else:                       pos_pts = 0
-    score_breakdown["position"] = pos_pts
+    # Pivot Distance (20pts) — pivot low에서 현재가까지 거리가 작을수록 고점수
+    # RR이 좋은 자리(pivot 직후)를 높게 평가, 이미 많이 오른 자리는 패널티
+    if pivot_dist_pct is None:
+        # pivot을 못 찾은 경우(데이터 부족): 중간값 부여
+        pivot_pts = 10
+    elif pivot_dist_pct <= 2:   pivot_pts = 20
+    elif pivot_dist_pct <= 4:   pivot_pts = 15
+    elif pivot_dist_pct <= 6:   pivot_pts = 8
+    elif pivot_dist_pct <= 9:   pivot_pts = 3
+    else:                        pivot_pts = 0
+    score_breakdown["pivot_distance"] = pivot_pts
 
     entry_score = round(sum(score_breakdown.values()), 1)
 
@@ -221,6 +233,8 @@ def validate_entry(
         "day_low":            round(day_low, 2),
         "from_high_pct":      from_high_pct,
         "close_position":     close_position,
+        "recent_pivot_low":   round(recent_pivot_low, 2) if recent_pivot_low else None,
+        "pivot_dist_pct":     pivot_dist_pct,
     }
 
     from datetime import datetime as _dt
@@ -347,6 +361,22 @@ def build_entry_timeline(
     return timeline
 
 
+def _get_recent_pivot_low(low: pd.Series, window: int = 2) -> float | None:
+    """
+    가장 최근의 확인된 pivot low(눌림 저점)를 반환.
+    좌우 window봉 기준으로 로컬 저점을 찾고, 그 중 가장 최근 것을 사용.
+    없으면 None 반환.
+    """
+    lows = low.values
+    n = len(lows)
+    pivot_lows = []
+    for i in range(window, n - window):
+        if (all(lows[i] <= lows[i - j] for j in range(1, window + 1)) and
+                all(lows[i] <= lows[i + j] for j in range(1, window + 1))):
+            pivot_lows.append(lows[i])
+    return float(pivot_lows[-1]) if pivot_lows else None
+
+
 def _empty_result() -> dict:
     return {
         "entry_score":     0,
@@ -354,5 +384,8 @@ def _empty_result() -> dict:
         "reason":          "-",
         "failed_reasons":  [],
         "signals":         {},
-        "score_breakdown": {"vwap": 0, "orb": 0, "volume": 0, "structure": 0, "position": 0},
+        "score_breakdown": {
+            "vwap": 0, "orb": 0, "volume": 0,
+            "structure": 0, "pivot_distance": 0,
+        },
     }
