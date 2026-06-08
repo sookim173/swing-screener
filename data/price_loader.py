@@ -116,11 +116,24 @@ def get_ticker_info(ticker: str) -> dict:
 
 
 def get_market_data(etf_list: list) -> dict:
-    """Fetch recent data for market ETFs"""
+    """Fetch recent data for market ETFs.
+
+    During regular market hours the last daily candle's close is replaced with
+    the live price so that MA comparisons reflect intraday conditions.
+    """
     result = {}
+    in_market = _is_regular_market_open()
     for ticker in etf_list:
         df = get_price_data(ticker, days=60)
         if df is not None:
+            if in_market:
+                try:
+                    live_price = yf.Ticker(ticker).fast_info.last_price
+                    if live_price and live_price > 0:
+                        df = df.copy()
+                        df.iloc[-1, df.columns.get_loc("close")] = live_price
+                except Exception:
+                    pass
             result[ticker] = df
         else:
             print(f"    [market_data] Could not load {ticker}")
@@ -146,6 +159,16 @@ def _et_offset() -> int:
     # DST: second Sunday March ~ first Sunday November
     month = datetime.now().month
     return -4 if 3 <= month <= 11 else -5
+
+
+def _is_regular_market_open() -> bool:
+    """Return True if US regular session is currently active (9:30–16:00 ET, Mon–Fri)."""
+    now_et = datetime.now(timezone.utc) + timedelta(hours=_et_offset())
+    if now_et.weekday() >= 5:
+        return False
+    open_t  = now_et.replace(hour=9,  minute=30, second=0, microsecond=0)
+    close_t = now_et.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return open_t <= now_et <= close_t
 
 
 def get_premarket_data(ticker: str) -> dict:
